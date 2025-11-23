@@ -433,6 +433,59 @@ static void proc_matmul_req(struct htp_context *     ctx,
     send_htp_rsp(ctx, req->op, rsp_status, rsp_bufs, 1, &prof);
 }
 
+static void proc_flash_attn_req(struct htp_context *     ctx,
+                          struct htp_general_req * req,
+                          struct dspqueue_buffer * bufs,
+                          uint32_t                 n_bufs) {
+    struct dspqueue_buffer rsp_bufs[HTP_MAX_PACKET_BUFFERS];
+
+    // Output is at index 4 (bufs[4])
+    int write_idx = 4;
+
+    // We had written to the output buffer, we'd also need to flush it
+    rsp_bufs[0].fd     = bufs[write_idx].fd;
+    rsp_bufs[0].ptr    = bufs[write_idx].ptr;
+    rsp_bufs[0].offset = bufs[write_idx].offset;
+    rsp_bufs[0].size   = bufs[write_idx].size;
+    rsp_bufs[0].flags  = (DSPQUEUE_BUFFER_FLAG_FLUSH_SENDER |         // Flush HTP
+                          DSPQUEUE_BUFFER_FLAG_INVALIDATE_RECIPIENT); // Invalidate CPU
+
+    // Setup Op context
+    struct htp_ops_context octx = { 0 };
+    octx.ctx                    = ctx;
+    octx.src0                   = req->src0; // Q
+    octx.src1                   = req->src1; // K
+    octx.src2                   = req->src2; // V
+    octx.src3                   = req->src3; // Mask
+
+    octx.dst   = req->dst;
+    octx.flags = req->flags;
+    octx.op    = req->op;
+
+    memcpy(octx.op_params, req->op_params, sizeof(octx.op_params));
+
+    // Update data pointers
+    octx.src0.data = (uint32_t) bufs[0].ptr; // Q
+    octx.src1.data = (uint32_t) bufs[1].ptr; // K
+    octx.src2.data = (uint32_t) bufs[2].ptr; // V
+    octx.src3.data = (uint32_t) bufs[3].ptr; // Mask
+    octx.dst.data  = (uint32_t) bufs[4].ptr; // Dst
+
+    octx.n_threads = ctx->n_threads;
+
+    struct profile_data prof;
+    profile_start(&prof);
+
+    uint32_t rsp_status = HTP_STATUS_INTERNAL_ERR;
+    if (vtcm_acquire(ctx) == AEE_SUCCESS) {
+        rsp_status = op_flash_attn_ext(&octx);
+        vtcm_release(ctx);
+    }
+
+    profile_stop(&prof);
+    send_htp_rsp(ctx, req->op, rsp_status, rsp_bufs, 1, &prof);
+}
+
 static void proc_matmul_id_req(struct htp_context *     ctx,
                                struct htp_general_req * req,
                                struct dspqueue_buffer * bufs,
@@ -819,6 +872,14 @@ static void htp_packet_callback(dspqueue_t queue, int error, void * context) {
                     continue;
                 }
                 proc_rope_req(ctx, &req, bufs, n_bufs);
+                break;
+
+            case HTP_OP_FLASH_ATTN_EXT:
+                if (n_bufs != 5) { // Q, K, V, Mask, Dst
+                    FARF(ERROR, "Bad flash-attn-req buffer list");
+                    continue;
+                }
+                proc_flash_attn_req(ctx, &req, bufs, n_bufs);
                 break;
 
             default:
