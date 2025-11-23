@@ -56,6 +56,7 @@ enum htp_op {
     HTP_OP_SOFTMAX        = 10,
     HTP_OP_ADD_ID         = 11,
     HTP_OP_ROPE           = 12,
+    HTP_OP_FLASH_ATTN_EXT = 13,
     INVALID
 };
 
@@ -136,6 +137,7 @@ struct htp_general_req {
     struct htp_tensor src0;  // Input0 tensor
     struct htp_tensor src1;  // Input1 tensor
     struct htp_tensor src2;  // Input2 tensor
+    struct htp_tensor src3;  // Input3 tensor
     struct htp_tensor dst;   // Output tensor
 
     // should be multiple of 64 bytes (cacheline)
