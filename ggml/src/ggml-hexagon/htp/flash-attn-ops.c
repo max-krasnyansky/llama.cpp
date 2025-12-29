@@ -70,7 +70,6 @@ static void hvx_vec_mad_f16(int n, void * restrict y, const void * restrict x, f
 
     __fp16 vf16 = (__fp16)v;
     union { __fp16 f; uint16_t i; } u16 = { .f = vf16 };
-
     HVX_Vector v_vec = Q6_Vh_vsplat_R(u16.i);
 
     for (int i = 0; i < nvec; ++i) {
@@ -80,7 +79,7 @@ static void hvx_vec_mad_f16(int n, void * restrict y, const void * restrict x, f
         HVX_Vector prod_qf16 = Q6_Vqf16_vmpy_VhfVhf(vx, v_vec);
         HVX_Vector prod_hf = Q6_Vhf_equals_Vqf16(prod_qf16);
 
-        ptr_y[i] = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vadd_VhfVhf(vy, prod_hf));
+        ptr_y[i] = Q6_Vhf_vadd_VhfVhf(vy, prod_hf);
     }
 
     if (left > 0) {
