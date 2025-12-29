@@ -41,13 +41,22 @@ static inline HVX_Vector Q6_Vsf_equals_Vw(HVX_Vector const in)
 }
 #endif
 
-static inline HVX_Vector hvx_vec_splat_fp32(float i) {
+static inline HVX_Vector hvx_vec_splat_fp32(float v) {
     union {
-        float   f;
-        int32_t i;
-    } fp32 = { .f = i };
+        float    f;
+        uint32_t i;
+    } fp32 = { .f = v };
 
     return Q6_V_vsplat_R(fp32.i);
+}
+
+static inline HVX_Vector hvx_vec_splat_fp16(float v) {
+    union {
+        __fp16   f;
+        uint16_t i;
+    } fp16 = { .f = v };
+
+    return Q6_Vh_vsplat_R(fp16.i);
 }
 
 static inline void hvx_vec_store_u(void * addr, uint32_t n, HVX_Vector v) {
