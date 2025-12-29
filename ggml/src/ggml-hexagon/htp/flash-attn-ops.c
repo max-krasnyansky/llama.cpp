@@ -177,12 +177,6 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
     const uint32_t DK = nek0;
     const uint32_t DV = nev0;
 
-    // broadcast factors
-    const uint32_t rk2 = neq2/nek2;
-    const uint32_t rk3 = neq3/nek3;
-    const uint32_t rv2 = neq2/nev2;
-    const uint32_t rv3 = neq3/nev3;
-
     // total rows in q
     const uint32_t nr = neq1*neq2*neq3;
 
@@ -230,11 +224,11 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
         // Clear accumulator
         memset(VKQ32, 0, DV * sizeof(float));
 
-        const uint32_t ik3 = iq3 / rk3;
-        const uint32_t ik2 = iq2 / rk2;
+        const uint32_t ik3 = fastdiv(iq3, &octx->broadcast_rk3);
+        const uint32_t ik2 = fastdiv(iq2, &octx->broadcast_rk2);
 
-        const uint32_t iv3 = iq3 / rv3;
-        const uint32_t iv2 = iq2 / rv2;
+        const uint32_t iv3 = fastdiv(iq3, &octx->broadcast_rv3);
+        const uint32_t iv2 = fastdiv(iq2, &octx->broadcast_rv2);
 
         const void * q_row_ptr;
         if (q->type == HTP_TYPE_F32) {
@@ -342,6 +336,11 @@ int op_flash_attn_ext(struct htp_ops_context * octx) {
 
     octx->src0_div21 = init_fastdiv_values(q->ne[2] * q->ne[1]);
     octx->src0_div1  = init_fastdiv_values(q->ne[1]);
+
+    octx->broadcast_rk2 = init_fastdiv_values(q->ne[2]/k->ne[2]);
+    octx->broadcast_rk3 = init_fastdiv_values(q->ne[3]/k->ne[3]);
+    octx->broadcast_rv2 = init_fastdiv_values(q->ne[2]/v->ne[2]);
+    octx->broadcast_rv3 = init_fastdiv_values(q->ne[3]/v->ne[3]);
 
     if (mask) {
         octx->src3_div2 = init_fastdiv_values(mask->ne[2]);
