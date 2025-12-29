@@ -1773,6 +1773,36 @@ static bool hex_supported_dims2(const struct ggml_tensor * x, const struct ggml_
     return true;
 }
 
+static bool ggml_hexagon_supported_flash_attn_ext(const struct ggml_hexagon_session * sess, const struct ggml_tensor * op) {
+    const struct ggml_tensor * src0 = op->src[0];
+    const struct ggml_tensor * src1 = op->src[1];
+    const struct ggml_tensor * src2 = op->src[2];
+    const struct ggml_tensor * dst  = op;
+
+    // Mask tensor not supported yet
+    if (op->src[3] != NULL) {
+        return false;
+    }
+
+    // Check for F16 support only as requested
+    if (src0->type != GGML_TYPE_F16 || src1->type != GGML_TYPE_F16 || src2->type != GGML_TYPE_F16) {
+        return false;
+    }
+
+    // For now we support F32 or F16 output as htp backend often converts output on the fly if needed,
+    // but the op implementation writes to F16 or F32.
+    // Let's assume dst can be F32 or F16.
+    if (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_F16) {
+        return false;
+    }
+
+    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(src2) || !ggml_is_contiguous(dst)) {
+        return false;
+    }
+
+    return true;
+}
+
 static bool hex_supported_src0_type(ggml_type t) {
     return t == GGML_TYPE_F32;
 }
@@ -2331,6 +2361,19 @@ static inline size_t init_rope_req(htp_general_req * req, dspqueue_buffer * bufs
     return n_bufs;
 }
 
+static inline size_t init_flash_attn_ext_req(htp_general_req * req, dspqueue_buffer * bufs, const ggml_tensor * t) {
+    memcpy(&req->op_params, &t->op_params, sizeof(t->op_params));
+    req->op = HTP_OP_FLASH_ATTN_EXT;
+
+    size_t n_bufs = 0;
+    n_bufs += htp_req_buff_init(&req->src0, &bufs[n_bufs], t->src[0], DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
+    n_bufs += htp_req_buff_init(&req->src1, &bufs[n_bufs], t->src[1], DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
+    n_bufs += htp_req_buff_init(&req->src2, &bufs[n_bufs], t->src[2], DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
+    n_bufs += htp_req_buff_init(&req->dst,  &bufs[n_bufs], t,         DSPQBUF_TYPE_DSP_WRITE_CPU_READ);
+
+    return n_bufs;
+}
+
 static const char * ggml_backend_hexagon_name(ggml_backend_t backend) {
     auto sess = static_cast<ggml_hexagon_session *>(backend->context);
     return sess->name.c_str();
@@ -2437,6 +2480,10 @@ static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, gg
 
             case GGML_OP_ROPE:
                 ggml_hexagon_dispatch_op<init_rope_req>(sess, node, flags);
+                break;
+
+            case GGML_OP_FLASH_ATTN_EXT:
+                ggml_hexagon_dispatch_op<init_flash_attn_ext_req>(sess, node, flags);
                 break;
 
             default:
@@ -2804,6 +2851,10 @@ static bool ggml_backend_hexagon_device_supports_op(ggml_backend_dev_t dev, cons
         case GGML_OP_ROPE:
             supp = ggml_hexagon_supported_rope(sess, op);
             break;
+
+            case GGML_OP_FLASH_ATTN_EXT:
+                supp = ggml_hexagon_supported_flash_attn_ext(sess, op);
+                break;
 
         default:
             break;
