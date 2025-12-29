@@ -1777,15 +1777,15 @@ static bool ggml_hexagon_supported_flash_attn_ext(const struct ggml_hexagon_sess
     const struct ggml_tensor * src0 = op->src[0];
     const struct ggml_tensor * src1 = op->src[1];
     const struct ggml_tensor * src2 = op->src[2];
+    const struct ggml_tensor * src3 = op->src[3];
     const struct ggml_tensor * dst  = op;
-
-    // Mask tensor not supported yet
-    if (op->src[3] != NULL) {
-        return false;
-    }
 
     // Check for F16 support only as requested
     if ((src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_F32) || src1->type != GGML_TYPE_F16 || src2->type != GGML_TYPE_F16) {
+        return false;
+    }
+
+    if (src3 && src3->type != GGML_TYPE_F16) {
         return false;
     }
 
@@ -1793,10 +1793,6 @@ static bool ggml_hexagon_supported_flash_attn_ext(const struct ggml_hexagon_sess
     // but the op implementation writes to F16 or F32.
     // Let's assume dst can be F32 or F16.
     if (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_F16) {
-        return false;
-    }
-
-    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(src2) || !ggml_is_contiguous(dst)) {
         return false;
     }
 
@@ -2356,6 +2352,9 @@ static inline size_t init_rope_req(htp_general_req * req, dspqueue_buffer * bufs
     n_bufs += htp_req_buff_init(&req->src0, &bufs[n_bufs], t->src[0], DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
     n_bufs += htp_req_buff_init(&req->src1, &bufs[n_bufs], t->src[1], DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
     n_bufs += htp_req_buff_init(&req->src2, &bufs[n_bufs], t->src[2], DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
+    if (t->src[3]) {
+        n_bufs += htp_req_buff_init(&req->src3, &bufs[n_bufs], t->src[3], DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
+    }
     n_bufs += htp_req_buff_init(&req->dst,  &bufs[n_bufs], t,         DSPQBUF_TYPE_DSP_WRITE_CPU_READ);
 
     return n_bufs;

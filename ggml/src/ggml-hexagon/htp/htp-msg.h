@@ -138,6 +138,7 @@ struct htp_general_req {
     struct htp_tensor src0;  // Input0 tensor
     struct htp_tensor src1;  // Input1 tensor
     struct htp_tensor src2;  // Input2 tensor
+    struct htp_tensor src3;  // Input3 tensor
     struct htp_tensor dst;   // Output tensor
 
     // should be multiple of 64 bytes (cacheline)

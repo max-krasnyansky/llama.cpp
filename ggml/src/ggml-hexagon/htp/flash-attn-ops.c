@@ -71,12 +71,6 @@ static void hvx_vec_mad_f16_f32(int n, float * restrict y, const void * restrict
     int nvec_x = n / 64;
     int left = n % 64;
 
-    // Prepare scalar v splat
-    // We need it as F16 for multiplication with F16 x, producing F32
-    // Or we convert x to F32 and multiply?
-    // Q6_Wqf32_vmpy_VhfVhf takes two Vhf and produces Wqf32 (two Vsf).
-    // So we can multiply x (Vhf) with v (Vhf splat).
-
     __fp16 vf16 = (__fp16)v;
     union { __fp16 f; uint16_t i; } u16 = { .f = vf16 };
     HVX_Vector v_vec = Q6_Vh_vsplat_R(u16.i);
@@ -93,14 +87,9 @@ static void hvx_vec_mad_f16_f32(int n, float * restrict y, const void * restrict
         HVX_Vector p0 = Q6_V_lo_W(prod);
         HVX_Vector p1 = Q6_V_hi_W(prod);
 
-        // Convert Wqf32 elements to Vsf (float) and add to y
-        // Q6_Wqf32_vmpy_VhfVhf result is already 2x 32-bit floats (Vsf) but in qf32 format?
-        // In hvx-utils.h, Q6_Vsf_equals_Vqf32 is used to cast/convert if needed.
-        // Actually Q6_Wqf32_vmpy_VhfVhf produces result scaled such that 1.0*1.0 = 1.0 (if inputs are 1.0).
-        // Let's assume standard float behavior for now as per other ops.
-
-        y0 = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vqf32(Q6_Vsf_equals_Vqf32(y0), p0));
-        y1 = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vqf32(Q6_Vsf_equals_Vqf32(y1), p1));
+        // Optimized add
+        y0 = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(p0, y0));
+        y1 = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(p1, y1));
 
         ptr_y[2*i] = y0;
         ptr_y[2*i+1] = y1;
@@ -140,6 +129,7 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
     const struct htp_tensor * q = &octx->src0;
     const struct htp_tensor * k = &octx->src1;
     const struct htp_tensor * v = &octx->src2;
+    const struct htp_tensor * mask = (octx->src3.type != HTP_TYPE_COUNT) ? &octx->src3 : NULL;
     struct htp_tensor * dst = &octx->dst;
 
     float scale = 0.0f;
@@ -218,6 +208,11 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
         Q_f16 = (__fp16 *) (spad + spad_offset);
     }
 
+    const uint32_t n_head = neq2;
+    const uint32_t n_head_log2 = 1u << (uint32_t) floor(log2(n_head));
+    const float m0 = powf(2.0f, -(max_bias       ) / n_head_log2);
+    const float m1 = powf(2.0f, -(max_bias / 2.0f) / n_head_log2);
+
     const uint32_t neq2_neq1 = neq2 * neq1;
 
     for (uint32_t ir = ir0; ir < ir1; ++ir) {
@@ -226,7 +221,8 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
         const uint32_t iq2 = fastdiv(rem, &octx->src0_div1);
         const uint32_t iq1 = rem - iq2 * neq1;
 
-        // ALiBi slope logic omitted as mask is not supported
+        const uint32_t h = iq2; // head index
+        const float slope = (max_bias > 0.0f) ? (h < n_head_log2 ? powf(m0, h + 1) : powf(m1, 2*(h - n_head_log2) + 1)) : 1.0f;
 
         float S = 0.0f;      // sum
         float M = -INFINITY; // maximum KQ value
@@ -252,6 +248,17 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
             q_row_ptr = (const uint8_t *) q->data + (iq1*nbq1 + iq2*nbq2 + iq3*nbq3);
         }
 
+        // Mask pointer base
+        const __fp16 * mp_base = NULL;
+        if (mask) {
+            // Mask offset calculation from ggml-cpu:
+            // mask->data + iq1*mask->nb[1] + (iq2%mask->ne[2])*mask->nb[2] + (iq3%mask->ne[3])*mask->nb[3]
+            // We need broadcasting indices.
+            const uint32_t im2 = fastmodulo(iq2, mask->ne[2], &octx->src3_div2);
+            const uint32_t im3 = fastmodulo(iq3, mask->ne[3], &octx->src3_div3);
+            mp_base = (const __fp16 *) ((const char *) mask->data + iq1*mask->nb[1] + im2*mask->nb[2] + im3*mask->nb[3]);
+        }
+
         // Loop over KV
         for (uint32_t ic = 0; ic < nek1; ++ic) {
             float s_val;
@@ -263,6 +270,15 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
 
             if (logit_softcap != 0.0f) {
                 s_val = logit_softcap * tanhf(s_val);
+            }
+
+            if (mask) {
+                // mask is F16 as checked in support function
+                // Assuming mask stride for last dim (nek1) is size of element (2) or nb[0]?
+                // GGML convention: nb[0] is stride between elements.
+                // We should use nb[0] if possible, but usual F16 tensors are contiguous in dim 0.
+                const __fp16 m_val = * (const __fp16 *) ((const char *) mp_base + ic * mask->nb[0]);
+                s_val += slope * (float)m_val;
             }
 
             const float Mold = M;
@@ -289,7 +305,7 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
         hvx_vec_scale_f32(DV, VKQ32, S_inv);
 
         // Store result
-        uint8_t * dst_ptr = (uint8_t *) dst->data + iq1 * nb2 + iq2 * nb1 + iq3 * nb3;
+        uint8_t * dst_ptr = (uint8_t *) dst->data + iq1 * nb1 + iq2 * nb2 + iq3 * nb3;
 
         if (dst->type == HTP_TYPE_F32) {
             float * d = (float *) dst_ptr;
@@ -314,6 +330,7 @@ int op_flash_attn_ext(struct htp_ops_context * octx) {
     const struct htp_tensor * q = &octx->src0;
     const struct htp_tensor * k = &octx->src1;
     const struct htp_tensor * v = &octx->src2;
+    const struct htp_tensor * mask = (octx->src3.type != HTP_TYPE_COUNT) ? &octx->src3 : NULL;
     struct htp_tensor * dst = &octx->dst;
 
     // Check support
@@ -325,6 +342,11 @@ int op_flash_attn_ext(struct htp_ops_context * octx) {
 
     octx->src0_div21 = init_fastdiv_values(q->ne[2] * q->ne[1]);
     octx->src0_div1  = init_fastdiv_values(q->ne[1]);
+
+    if (mask) {
+        octx->src3_div2 = init_fastdiv_values(mask->ne[2]);
+        octx->src3_div3 = init_fastdiv_values(mask->ne[3]);
+    }
 
     size_t spad_size_vkq = htp_round_up(octx->src2.ne[0] * sizeof(float), 128); // VKQ32
     size_t spad_size_q = 0;

@@ -722,11 +722,13 @@ static void proc_flash_attn_ext_req(struct htp_context *     ctx,
                                     uint32_t                 n_bufs) {
     struct dspqueue_buffer rsp_bufs[1];
 
+    int write_idx = (n_bufs == 5) ? 4 : 3;
+
     // We had written to the output buffer, we'd also need to flush it
-    rsp_bufs[0].fd     = bufs[3].fd;
-    rsp_bufs[0].ptr    = bufs[3].ptr;
-    rsp_bufs[0].offset = bufs[3].offset;
-    rsp_bufs[0].size   = bufs[3].size;
+    rsp_bufs[0].fd     = bufs[write_idx].fd;
+    rsp_bufs[0].ptr    = bufs[write_idx].ptr;
+    rsp_bufs[0].offset = bufs[write_idx].offset;
+    rsp_bufs[0].size   = bufs[write_idx].size;
     rsp_bufs[0].flags  = (DSPQUEUE_BUFFER_FLAG_FLUSH_SENDER |         // Flush HTP
                           DSPQUEUE_BUFFER_FLAG_INVALIDATE_RECIPIENT); // Invalidate CPU
 
@@ -736,6 +738,9 @@ static void proc_flash_attn_ext_req(struct htp_context *     ctx,
     octx.src0                   = req->src0;
     octx.src1                   = req->src1;
     octx.src2                   = req->src2;
+    if (n_bufs == 5) {
+        octx.src3 = req->src3;
+    }
     octx.dst                    = req->dst;
     octx.flags                  = req->flags;
     octx.op                     = req->op;
@@ -746,7 +751,12 @@ static void proc_flash_attn_ext_req(struct htp_context *     ctx,
     octx.src0.data = (uint32_t) bufs[0].ptr;
     octx.src1.data = (uint32_t) bufs[1].ptr;
     octx.src2.data = (uint32_t) bufs[2].ptr;
-    octx.dst.data  = (uint32_t) bufs[3].ptr;
+    if (n_bufs == 5) {
+        octx.src3.data = (uint32_t) bufs[3].ptr;
+        octx.dst.data  = (uint32_t) bufs[4].ptr;
+    } else {
+        octx.dst.data  = (uint32_t) bufs[3].ptr;
+    }
     octx.n_threads = ctx->n_threads;
 
     struct profile_data prof;
@@ -880,7 +890,7 @@ static void htp_packet_callback(dspqueue_t queue, int error, void * context) {
                 break;
 
             case HTP_OP_FLASH_ATTN_EXT:
-                if (n_bufs != 4) {
+                if ((n_bufs != 4) && (n_bufs != 5)) {
                     FARF(ERROR, "Bad flash-attn-ext-req buffer list");
                     continue;
                 }

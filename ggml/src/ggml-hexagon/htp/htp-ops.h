@@ -26,11 +26,13 @@ struct htp_ops_context {
     struct htp_tensor src0;
     struct htp_tensor src1;
     struct htp_tensor src2;
+    struct htp_tensor src3;
     struct htp_tensor dst;
 
     struct htp_spad src0_spad;
     struct htp_spad src1_spad;
     struct htp_spad src2_spad;
+    struct htp_spad src3_spad;
     struct htp_spad dst_spad;
 
     worker_pool_context_t * wpool;      // worker pool
