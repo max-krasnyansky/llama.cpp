@@ -755,6 +755,7 @@ static void proc_flash_attn_ext_req(struct htp_context *     ctx,
         octx.src3.data = (uint32_t) bufs[3].ptr;
         octx.dst.data  = (uint32_t) bufs[4].ptr;
     } else {
+        octx.src3.type = HTP_TYPE_COUNT;
         octx.dst.data  = (uint32_t) bufs[3].ptr;
     }
     octx.n_threads = ctx->n_threads;

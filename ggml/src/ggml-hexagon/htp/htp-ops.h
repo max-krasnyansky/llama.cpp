@@ -51,6 +51,11 @@ struct htp_ops_context {
     struct fastdiv_values src1_div3;  // fastdiv values for ne3
     struct fastdiv_values src1_div21; // fastdiv values for ne2 * ne1
 
+    struct fastdiv_values src3_div1;  // fastdiv values for ne1
+    struct fastdiv_values src3_div2;  // fastdiv values for ne2
+    struct fastdiv_values src3_div3;  // fastdiv values for ne3
+    struct fastdiv_values src3_div21; // fastdiv values for ne2 * ne1
+
     uint32_t flags;
 };
 
