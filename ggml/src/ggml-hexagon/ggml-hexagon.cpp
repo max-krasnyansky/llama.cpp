@@ -1785,7 +1785,7 @@ static bool ggml_hexagon_supported_flash_attn_ext(const struct ggml_hexagon_sess
     }
 
     // Check for F16 support only as requested
-    if (src0->type != GGML_TYPE_F16 || src1->type != GGML_TYPE_F16 || src2->type != GGML_TYPE_F16) {
+    if ((src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_F32) || src1->type != GGML_TYPE_F16 || src2->type != GGML_TYPE_F16) {
         return false;
     }
 

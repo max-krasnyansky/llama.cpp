@@ -59,59 +59,79 @@ static void hvx_vec_dot_f16(int n, float * restrict s, const void * restrict vx,
     *s = res;
 }
 
-// MAD F16: y += x * v (scalar)
-// y (aligned) and x (unaligned) are F16 vectors. v is float scalar.
-static void hvx_vec_mad_f16(int n, void * restrict y, const void * restrict x, float v) {
+// MAD: y (F32) += x (F16) * v (float)
+static void hvx_vec_mad_f16_f32(int n, float * restrict y, const void * restrict x, float v) {
     const HVX_UVector * restrict ptr_x = (const HVX_UVector *) x;
     HVX_Vector * restrict ptr_y = (HVX_Vector *) y;
 
-    int nvec = n / 64;
+    // x is F16, so 64 elements per vector.
+    // y is F32, so 32 elements per vector.
+    // We need to process 2 y vectors for 1 x vector.
+
+    int nvec_x = n / 64;
     int left = n % 64;
+
+    // Prepare scalar v splat
+    // We need it as F16 for multiplication with F16 x, producing F32
+    // Or we convert x to F32 and multiply?
+    // Q6_Wqf32_vmpy_VhfVhf takes two Vhf and produces Wqf32 (two Vsf).
+    // So we can multiply x (Vhf) with v (Vhf splat).
 
     __fp16 vf16 = (__fp16)v;
     union { __fp16 f; uint16_t i; } u16 = { .f = vf16 };
     HVX_Vector v_vec = Q6_Vh_vsplat_R(u16.i);
 
-    for (int i = 0; i < nvec; ++i) {
+    for (int i = 0; i < nvec_x; ++i) {
         HVX_Vector vx = ptr_x[i];
-        HVX_Vector vy = ptr_y[i];
 
-        HVX_Vector prod_qf16 = Q6_Vqf16_vmpy_VhfVhf(vx, v_vec);
-        HVX_Vector prod_hf = Q6_Vhf_equals_Vqf16(prod_qf16);
+        // y pointers
+        HVX_Vector y0 = ptr_y[2*i];
+        HVX_Vector y1 = ptr_y[2*i+1];
 
-        ptr_y[i] = Q6_Vhf_vadd_VhfVhf(vy, prod_hf);
+        // Multiply x * v -> pair of F32 vectors
+        HVX_VectorPair prod = Q6_Wqf32_vmpy_VhfVhf(vx, v_vec);
+        HVX_Vector p0 = Q6_V_lo_W(prod);
+        HVX_Vector p1 = Q6_V_hi_W(prod);
+
+        // Convert Wqf32 elements to Vsf (float) and add to y
+        // Q6_Wqf32_vmpy_VhfVhf result is already 2x 32-bit floats (Vsf) but in qf32 format?
+        // In hvx-utils.h, Q6_Vsf_equals_Vqf32 is used to cast/convert if needed.
+        // Actually Q6_Wqf32_vmpy_VhfVhf produces result scaled such that 1.0*1.0 = 1.0 (if inputs are 1.0).
+        // Let's assume standard float behavior for now as per other ops.
+
+        y0 = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vqf32(Q6_Vsf_equals_Vqf32(y0), p0));
+        y1 = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vqf32(Q6_Vsf_equals_Vqf32(y1), p1));
+
+        ptr_y[2*i] = y0;
+        ptr_y[2*i+1] = y1;
     }
 
     if (left > 0) {
-        const __fp16 * px = (const __fp16 *) x + nvec * 64;
-        __fp16 * py = (__fp16 *) y + nvec * 64;
+        const __fp16 * px = (const __fp16 *) x + nvec_x * 64;
+        float * py = y + nvec_x * 64;
         for (int i = 0; i < left; ++i) {
-            py[i] += px[i] * vf16;
+            py[i] += (float)px[i] * v;
         }
     }
 }
 
-// Scale F16 vector: y *= scale
-static void hvx_vec_scale_f16(int n, void * restrict y, float v) {
+// Scale F32 vector
+static void hvx_vec_scale_f32(int n, float * restrict y, float v) {
     HVX_Vector * restrict ptr_y = (HVX_Vector *) y;
+    int nvec = n / 32;
+    int left = n % 32;
 
-    int nvec = n / 64;
-    int left = n % 64;
-
-    __fp16 vf16 = (__fp16)v;
-    union { __fp16 f; uint16_t i; } u16 = { .f = vf16 };
-    HVX_Vector v_vec = Q6_Vh_vsplat_R(u16.i);
+    HVX_Vector v_vec = hvx_vec_splat_fp32(v);
 
     for (int i = 0; i < nvec; ++i) {
-        HVX_Vector vy = ptr_y[i];
-        HVX_Vector prod_qf16 = Q6_Vqf16_vmpy_VhfVhf(vy, v_vec);
-        ptr_y[i] = Q6_Vhf_equals_Vqf16(prod_qf16);
+        HVX_Vector val = ptr_y[i];
+        ptr_y[i] = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vmpy_VsfVsf(val, v_vec));
     }
 
     if (left > 0) {
-        __fp16 * py = (__fp16 *) y + nvec * 64;
+        float * py = y + nvec * 32;
         for (int i = 0; i < left; ++i) {
-            py[i] *= vf16;
+            py[i] *= v;
         }
     }
 }
@@ -182,13 +202,21 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
 
     if (ir0 >= ir1) return;
 
-    uint8_t * spad = octx->src0_spad.data + octx->src0_spad.size_per_thread * ith;
-    __fp16 * VKQ16 = (__fp16 *) spad;
+    // Scratchpad layout:
+    // VKQ32: DV * sizeof(float)
+    // Q_f16: DK * sizeof(__fp16) (only if Q is F32)
 
-    // const uint32_t n_head = neq2;
-    // const uint32_t n_head_log2 = 1u << (uint32_t) floor(log2(n_head));
-    // const float m0 = powf(2.0f, -(max_bias       ) / n_head_log2);
-    // const float m1 = powf(2.0f, -(max_bias / 2.0f) / n_head_log2);
+    uint8_t * spad = octx->src0_spad.data + octx->src0_spad.size_per_thread * ith;
+
+    // Align VKQ32
+    size_t spad_offset = 0;
+    float * VKQ32 = (float *) (spad + spad_offset);
+    spad_offset += htp_round_up(DV * sizeof(float), 128);
+
+    __fp16 * Q_f16 = NULL;
+    if (q->type == HTP_TYPE_F32) {
+        Q_f16 = (__fp16 *) (spad + spad_offset);
+    }
 
     const uint32_t neq2_neq1 = neq2 * neq1;
 
@@ -198,14 +226,13 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
         const uint32_t iq2 = fastdiv(rem, &octx->src0_div1);
         const uint32_t iq1 = rem - iq2 * neq1;
 
-        // const uint32_t h = iq2; // head index
-        // const float slope = (max_bias > 0.0f) ? (h < n_head_log2 ? powf(m0, h + 1) : powf(m1, 2*(h - n_head_log2) + 1)) : 1.0f;
+        // ALiBi slope logic omitted as mask is not supported
 
         float S = 0.0f;      // sum
         float M = -INFINITY; // maximum KQ value
 
         // Clear accumulator
-        memset(VKQ16, 0, DV * sizeof(__fp16));
+        memset(VKQ32, 0, DV * sizeof(float));
 
         const uint32_t ik3 = iq3 / rk3;
         const uint32_t ik2 = iq2 / rk2;
@@ -213,22 +240,30 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
         const uint32_t iv3 = iq3 / rv3;
         const uint32_t iv2 = iq2 / rv2;
 
-        const uint8_t * q_ptr = (const uint8_t *) q->data + (iq1*nbq1 + iq2*nbq2 + iq3*nbq3);
+        const void * q_row_ptr;
+        if (q->type == HTP_TYPE_F32) {
+            // Convert F32 Q row to F16
+            const float * q_f32 = (const float *) ((const uint8_t *)q->data + (iq1*nbq1 + iq2*nbq2 + iq3*nbq3));
+            for (int i = 0; i < DK; ++i) {
+                Q_f16[i] = (__fp16)q_f32[i];
+            }
+            q_row_ptr = Q_f16;
+        } else {
+            q_row_ptr = (const uint8_t *) q->data + (iq1*nbq1 + iq2*nbq2 + iq3*nbq3);
+        }
 
         // Loop over KV
         for (uint32_t ic = 0; ic < nek1; ++ic) {
             float s_val;
             const uint8_t * k_ptr = (const uint8_t *) k->data + (ic*nbk1 + ik2*nbk2 + ik3*nbk3);
 
-            hvx_vec_dot_f16(DK, &s_val, q_ptr, k_ptr);
+            hvx_vec_dot_f16(DK, &s_val, q_row_ptr, k_ptr);
 
             s_val *= scale;
 
             if (logit_softcap != 0.0f) {
                 s_val = logit_softcap * tanhf(s_val);
             }
-
-            // ALiBi slope application would go here if mask was supported
 
             const float Mold = M;
             float ms = 1.0f;
@@ -237,19 +272,21 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
             if (s_val > M) {
                 M = s_val;
                 ms = expf(Mold - M);
-                hvx_vec_scale_f16(DV, VKQ16, ms);
+                hvx_vec_scale_f32(DV, VKQ32, ms);
             } else {
                 vs = expf(s_val - M);
             }
 
             const uint8_t * v_ptr = (const uint8_t *) v->data + (ic*nbv1 + iv2*nbv2 + iv3*nbv3);
-            hvx_vec_mad_f16(DV, VKQ16, v_ptr, vs);
+
+            // Accumulate V: VKQ32 += v_ptr * vs
+            hvx_vec_mad_f16_f32(DV, VKQ32, v_ptr, vs);
 
             S = S*ms + vs;
         }
 
         const float S_inv = S == 0.0f ? 0.0f : 1.0f/S;
-        hvx_vec_scale_f16(DV, VKQ16, S_inv);
+        hvx_vec_scale_f32(DV, VKQ32, S_inv);
 
         // Store result
         uint8_t * dst_ptr = (uint8_t *) dst->data + iq1 * nb2 + iq2 * nb1 + iq3 * nb3;
@@ -257,12 +294,12 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
         if (dst->type == HTP_TYPE_F32) {
             float * d = (float *) dst_ptr;
             for (int i = 0; i < DV; ++i) {
-                d[i] = (float)VKQ16[i];
+                d[i] = VKQ32[i];
             }
         } else if (dst->type == HTP_TYPE_F16) {
             __fp16 * d = (__fp16 *) dst_ptr;
             for (int i = 0; i < DV; ++i) {
-                d[i] = VKQ16[i];
+                d[i] = (__fp16)VKQ32[i];
             }
         }
     }
@@ -279,17 +316,27 @@ int op_flash_attn_ext(struct htp_ops_context * octx) {
     const struct htp_tensor * v = &octx->src2;
     struct htp_tensor * dst = &octx->dst;
 
-    if (q->type != HTP_TYPE_F16 || k->type != HTP_TYPE_F16 || v->type != HTP_TYPE_F16) {
+    // Check support
+    if ((q->type != HTP_TYPE_F16 && q->type != HTP_TYPE_F32) ||
+        k->type != HTP_TYPE_F16 ||
+        v->type != HTP_TYPE_F16) {
         return HTP_STATUS_NO_SUPPORT;
     }
 
     octx->src0_div21 = init_fastdiv_values(q->ne[2] * q->ne[1]);
     octx->src0_div1  = init_fastdiv_values(q->ne[1]);
 
-    size_t spad_size = octx->src2.ne[0] * sizeof(__fp16); // DV
-    spad_size = htp_round_up(spad_size, 128);
-    octx->src0_spad.size_per_thread = spad_size;
-    octx->src0_spad.size = spad_size * octx->n_threads;
+    size_t spad_size_vkq = htp_round_up(octx->src2.ne[0] * sizeof(float), 128); // VKQ32
+    size_t spad_size_q = 0;
+
+    if (q->type == HTP_TYPE_F32) {
+        spad_size_q = htp_round_up(octx->src0.ne[0] * sizeof(__fp16), 128);
+    }
+
+    size_t spad_size_total = spad_size_vkq + spad_size_q;
+
+    octx->src0_spad.size_per_thread = spad_size_total;
+    octx->src0_spad.size = spad_size_total * octx->n_threads;
 
     if (octx->ctx->vtcm_size < octx->src0_spad.size) {
         return HTP_STATUS_VTCM_TOO_SMALL;
