@@ -154,6 +154,6 @@ struct htp_general_rsp {
 };
 
 #define HTP_MAX_MESSAGE_SIZE   sizeof(struct htp_general_req)
-#define HTP_MAX_PACKET_BUFFERS 8
+#define HTP_MAX_PACKET_BUFFERS 4
 
 #endif /* HTP_MSG_H */
