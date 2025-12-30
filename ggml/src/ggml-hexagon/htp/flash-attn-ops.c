@@ -62,7 +62,7 @@ static void hvx_vec_dot_f16(int n, float * restrict s, const void * restrict vx,
 // MAD: y (F32) += x (F16) * v (float)
 static void hvx_vec_mad_f16_f32(int n, float * restrict y, const void * restrict x, float v) {
     const HVX_UVector * restrict ptr_x = (const HVX_UVector *) x;
-    HVX_Vector * restrict ptr_y = (HVX_Vector *) y;
+    HVX_UVector * restrict ptr_y = (HVX_UVector *) y;
 
     // x is F16, so 64 elements per vector.
     // y is F32, so 32 elements per vector.
@@ -106,7 +106,7 @@ static void hvx_vec_mad_f16_f32(int n, float * restrict y, const void * restrict
 
 // Scale F32 vector
 static void hvx_vec_scale_f32(int n, float * restrict y, float v) {
-    HVX_Vector * restrict ptr_y = (HVX_Vector *) y;
+    HVX_UVector * restrict ptr_y = (HVX_UVector *) y;
     int nvec = n / 32;
     int left = n % 32;
 
@@ -267,12 +267,8 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
             }
 
             if (mask) {
-                // mask is F16 as checked in support function
-                // Assuming mask stride for last dim (nek1) is size of element (2) or nb[0]?
-                // GGML convention: nb[0] is stride between elements.
-                // We should use nb[0] if possible, but usual F16 tensors are contiguous in dim 0.
                 const __fp16 m_val = * (const __fp16 *) ((const char *) mp_base + ic * mask->nb[0]);
-                s_val += slope * (float)m_val;
+                s_val += slope * (float) m_val;
             }
 
             const float Mold = M;
@@ -365,7 +361,9 @@ int op_flash_attn_ext(struct htp_ops_context * octx) {
 
     octx->src0_spad.data = octx->ctx->vtcm_base;
 
-    worker_pool_run_func(octx->ctx->worker_pool, htp_flash_attn_ext_job, octx, octx->n_threads);
+    if (!(octx->flags & HTP_OPFLAGS_SKIP_COMPUTE)) {
+        worker_pool_run_func(octx->ctx->worker_pool, htp_flash_attn_ext_job, octx, octx->n_threads);
+    }
 
     return HTP_STATUS_OK;
 }
