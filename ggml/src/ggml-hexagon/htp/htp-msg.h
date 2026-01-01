@@ -58,6 +58,10 @@ enum htp_op {
     HTP_OP_ADD_ID         = 12,
     HTP_OP_ROPE           = 13,
     HTP_OP_FLASH_ATTN_EXT = 14,
+    HTP_OP_SCALE          = 15,
+    HTP_OP_CPY            = 16,
+    HTP_OP_SET_ROWS       = 17,
+    HTP_OP_GET_ROWS       = 18,
     INVALID
 };
 

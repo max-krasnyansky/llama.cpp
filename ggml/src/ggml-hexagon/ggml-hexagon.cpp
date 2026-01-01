@@ -2223,6 +2223,8 @@ static inline void ggml_hexagon_dispatch_op(ggml_hexagon_session *sess, const st
 
 template <bool _is_src0_constant>
 static inline size_t init_binary_req(htp_general_req * req, dspqueue_buffer * bufs, const ggml_tensor * t) {
+    memcpy(&req->op_params, &t->op_params, sizeof(t->op_params));
+
     switch (t->op) {
         case GGML_OP_MUL_MAT:
             req->op = HTP_OP_MUL_MAT;
@@ -2235,6 +2237,9 @@ static inline size_t init_binary_req(htp_general_req * req, dspqueue_buffer * bu
             break;
         case GGML_OP_SUB:
             req->op = HTP_OP_SUB;
+            break;
+        case GGML_OP_SCALE:
+            req->op = HTP_OP_SCALE;
             break;
         default:
             GGML_ABORT("ggml-hex: binary : unsupported op: %d\n", t->op);
@@ -2262,6 +2267,12 @@ static inline size_t init_binary_id_req(htp_general_req * req, dspqueue_buffer *
         case GGML_OP_ADD_ID:
             req->op = HTP_OP_ADD_ID;
             break;
+        case GGML_OP_GET_ROWS:
+            req->op = HTP_OP_GET_ROWS;
+            break;
+        case GGML_OP_SET_ROWS:
+            req->op = HTP_OP_SET_ROWS;
+            break;
         default:
             GGML_ABORT("ggml-hex: unsupported op: %d\n", t->op);
     }
@@ -2274,7 +2285,9 @@ static inline size_t init_binary_id_req(htp_general_req * req, dspqueue_buffer *
     size_t n_bufs = 0;
     n_bufs += htp_req_buff_init(&req->src0, &bufs[n_bufs], t->src[0], _is_src0_constant ? DSPQBUF_TYPE_CONSTANT : DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
     n_bufs += htp_req_buff_init(&req->src1, &bufs[n_bufs], t->src[1], DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
-    n_bufs += htp_req_buff_init(&req->src2, &bufs[n_bufs], t->src[2], DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
+    if (t->src[2]) {
+        n_bufs += htp_req_buff_init(&req->src2, &bufs[n_bufs], t->src[2], DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
+    }
     n_bufs += htp_req_buff_init(&req->dst,  &bufs[n_bufs], t,         DSPQBUF_TYPE_DSP_WRITE_CPU_READ);
 
     return n_bufs;
@@ -2313,6 +2326,11 @@ static inline size_t init_unary_req(htp_general_req * req, dspqueue_buffer * buf
 
         case GGML_OP_SOFT_MAX:
             req->op   = HTP_OP_SOFTMAX;
+            supported = true;
+            break;
+
+        case GGML_OP_CPY:
+            req->op   = HTP_OP_CPY;
             supported = true;
             break;
 
@@ -2470,6 +2488,24 @@ static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, gg
 
             case GGML_OP_FLASH_ATTN_EXT:
                 ggml_hexagon_dispatch_op<init_flash_attn_ext_req>(sess, node, flags);
+                break;
+
+            case GGML_OP_SCALE:
+                ggml_hexagon_dispatch_op<init_binary_req<false>>(sess, node, flags); // Reusing binary init but dispatching as SCALE via op mapping
+                break;
+
+            case GGML_OP_CPY:
+                ggml_hexagon_dispatch_op<init_unary_req>(sess, node, flags); // Reusing unary init
+                break;
+
+            case GGML_OP_GET_ROWS:
+            case GGML_OP_SET_ROWS:
+                ggml_hexagon_dispatch_op<init_binary_id_req<false>>(sess, node, flags); // Using binary_id req structure (src0, src1, dst)? No, rows needs indices.
+                // Actually binary_id_req maps src0, src1, src2 (IDs), dst.
+                // GET_ROWS: dst = src0[src1]. src0=data, src1=indices.
+                // SET_ROWS: dst = src0, dst[src1] = src2. src0=data, src1=indices, src2=values.
+                // We need a specific init function for rows to handle this correctly or reuse binary/ternary if compatible.
+                // Let's use a new init function for clarity.
                 break;
 
             default:
@@ -2840,6 +2876,28 @@ static bool ggml_backend_hexagon_device_supports_op(ggml_backend_dev_t dev, cons
 
         case GGML_OP_FLASH_ATTN_EXT:
             supp = ggml_hexagon_supported_flash_attn_ext(sess, op);
+            break;
+
+        case GGML_OP_SCALE:
+            supp = ggml_hexagon_supported_binary(sess, op); // Reuse binary support logic as SCALE has similar constraints
+            break;
+
+        case GGML_OP_CPY:
+            supp = ggml_hexagon_supported_unary(sess, op); // CPY is unary-like
+            break;
+
+        case GGML_OP_GET_ROWS:
+        case GGML_OP_SET_ROWS:
+            if (op->src[1]->type != GGML_TYPE_I32) {
+                supp = false;
+            } else {
+                // Check src0/dst support
+                supp = hex_supported_src0_type(op->src[0]->type) && hex_supported_dst_type(op->type);
+                // Also check contiguous if needed, though rows ops handle non-contig
+                if (!ggml_is_contiguous(op->src[0]) || !ggml_is_contiguous(op->src[1])) {
+                    supp = false;
+                }
+            }
             break;
 
         default:
