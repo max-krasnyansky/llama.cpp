@@ -907,6 +907,238 @@ static void vec_dot_mxfp4x4x2_q8x4x2_rx2(const int n,
     hvx_vec_store_u(&s[0], 8, Q6_V_lo_W(p0));
 }
 
+static void vec_dot_f16_f16(const int n, float * restrict s, const void * restrict x, const void * restrict y) {
+    const HVX_UVector * restrict vx = (const HVX_UVector * restrict) x;
+    const HVX_UVector * restrict vy = (const HVX_UVector * restrict) y;
+
+    uint32_t nvec = n / 64;  // 128 bytes / 2 bytes = 64 elements
+    uint32_t nloe = n % 64;
+
+    HVX_Vector rsum = Q6_V_vsplat_R(0);
+
+    for (uint32_t i = 0; i < nvec; ++i) {
+        HVX_Vector xv = vx[i];
+        HVX_Vector yv = vy[i];
+        HVX_VectorPair p = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv), Q6_Vh_vshuff_Vh(yv));
+        rsum = Q6_Vqf32_vadd_Vqf32Vqf32(rsum, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p), Q6_V_hi_W(p)));
+    }
+
+    if (nloe) {
+        HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe * 2);
+        HVX_Vector xv = Q6_V_vand_QV(bmask, vx[nvec]);
+        HVX_Vector yv = vy[nvec];
+        HVX_VectorPair p = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv), Q6_Vh_vshuff_Vh(yv));
+        rsum = Q6_Vqf32_vadd_Vqf32Vqf32(rsum, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p), Q6_V_hi_W(p)));
+    }
+
+    rsum = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(rsum));
+    hvx_vec_store_u(s, 4, rsum);
+}
+
+static void vec_dot_f16_f16_4x4(const int n,
+                                float * restrict dst,
+                                size_t dst_stride,
+                                const void * restrict vx,
+                                size_t vx_stride,
+                                const void * restrict vy,
+                                size_t vy_stride) {
+    const HVX_UVector * restrict x0 = (const HVX_UVector * restrict) vx;
+    const HVX_UVector * restrict x1 = (const HVX_UVector * restrict) ((const uint8_t *) vx + vx_stride);
+    const HVX_UVector * restrict x2 = (const HVX_UVector * restrict) ((const uint8_t *) vx + 2 * vx_stride);
+    const HVX_UVector * restrict x3 = (const HVX_UVector * restrict) ((const uint8_t *) vx + 3 * vx_stride);
+
+    const HVX_UVector * restrict y0 = (const HVX_UVector * restrict) vy;
+    const HVX_UVector * restrict y1 = (const HVX_UVector * restrict) ((const uint8_t *) vy + vy_stride);
+    const HVX_UVector * restrict y2 = (const HVX_UVector * restrict) ((const uint8_t *) vy + 2 * vy_stride);
+    const HVX_UVector * restrict y3 = (const HVX_UVector * restrict) ((const uint8_t *) vy + 3 * vy_stride);
+
+    float * restrict d0 = dst;
+    float * restrict d1 = (float *) ((uint8_t *) dst + dst_stride);
+    float * restrict d2 = (float *) ((uint8_t *) dst + 2 * dst_stride);
+    float * restrict d3 = (float *) ((uint8_t *) dst + 3 * dst_stride);
+
+    HVX_Vector acc00 = Q6_V_vsplat_R(0);
+    HVX_Vector acc01 = Q6_V_vsplat_R(0);
+    HVX_Vector acc02 = Q6_V_vsplat_R(0);
+    HVX_Vector acc03 = Q6_V_vsplat_R(0);
+
+    HVX_Vector acc10 = Q6_V_vsplat_R(0);
+    HVX_Vector acc11 = Q6_V_vsplat_R(0);
+    HVX_Vector acc12 = Q6_V_vsplat_R(0);
+    HVX_Vector acc13 = Q6_V_vsplat_R(0);
+
+    HVX_Vector acc20 = Q6_V_vsplat_R(0);
+    HVX_Vector acc21 = Q6_V_vsplat_R(0);
+    HVX_Vector acc22 = Q6_V_vsplat_R(0);
+    HVX_Vector acc23 = Q6_V_vsplat_R(0);
+
+    HVX_Vector acc30 = Q6_V_vsplat_R(0);
+    HVX_Vector acc31 = Q6_V_vsplat_R(0);
+    HVX_Vector acc32 = Q6_V_vsplat_R(0);
+    HVX_Vector acc33 = Q6_V_vsplat_R(0);
+
+    uint32_t nvec = n / 64;  // 128 bytes / 2 bytes = 64 elements
+    uint32_t nloe = n % 64;
+
+    for (uint32_t i = 0; i < nvec; ++i) {
+        HVX_Vector xv0 = x0[i];
+        HVX_Vector xv1 = x1[i];
+        HVX_Vector xv2 = x2[i];
+        HVX_Vector xv3 = x3[i];
+
+        HVX_Vector yv0 = y0[i];
+        HVX_Vector yv1 = y1[i];
+        HVX_Vector yv2 = y2[i];
+        HVX_Vector yv3 = y3[i];
+
+        // Process row 0
+        HVX_VectorPair p00 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv0), Q6_Vh_vshuff_Vh(yv0));
+        HVX_VectorPair p01 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv0), Q6_Vh_vshuff_Vh(yv1));
+        HVX_VectorPair p02 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv0), Q6_Vh_vshuff_Vh(yv2));
+        HVX_VectorPair p03 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv0), Q6_Vh_vshuff_Vh(yv3));
+
+        acc00 = Q6_Vqf32_vadd_Vqf32Vqf32(acc00, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p00), Q6_V_hi_W(p00)));
+        acc01 = Q6_Vqf32_vadd_Vqf32Vqf32(acc01, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p01), Q6_V_hi_W(p01)));
+        acc02 = Q6_Vqf32_vadd_Vqf32Vqf32(acc02, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p02), Q6_V_hi_W(p02)));
+        acc03 = Q6_Vqf32_vadd_Vqf32Vqf32(acc03, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p03), Q6_V_hi_W(p03)));
+
+        // Process row 1
+        HVX_VectorPair p10 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv1), Q6_Vh_vshuff_Vh(yv0));
+        HVX_VectorPair p11 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv1), Q6_Vh_vshuff_Vh(yv1));
+        HVX_VectorPair p12 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv1), Q6_Vh_vshuff_Vh(yv2));
+        HVX_VectorPair p13 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv1), Q6_Vh_vshuff_Vh(yv3));
+
+        acc10 = Q6_Vqf32_vadd_Vqf32Vqf32(acc10, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p10), Q6_V_hi_W(p10)));
+        acc11 = Q6_Vqf32_vadd_Vqf32Vqf32(acc11, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p11), Q6_V_hi_W(p11)));
+        acc12 = Q6_Vqf32_vadd_Vqf32Vqf32(acc12, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p12), Q6_V_hi_W(p12)));
+        acc13 = Q6_Vqf32_vadd_Vqf32Vqf32(acc13, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p13), Q6_V_hi_W(p13)));
+
+        // Process row 2
+        HVX_VectorPair p20 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv2), Q6_Vh_vshuff_Vh(yv0));
+        HVX_VectorPair p21 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv2), Q6_Vh_vshuff_Vh(yv1));
+        HVX_VectorPair p22 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv2), Q6_Vh_vshuff_Vh(yv2));
+        HVX_VectorPair p23 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv2), Q6_Vh_vshuff_Vh(yv3));
+
+        acc20 = Q6_Vqf32_vadd_Vqf32Vqf32(acc20, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p20), Q6_V_hi_W(p20)));
+        acc21 = Q6_Vqf32_vadd_Vqf32Vqf32(acc21, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p21), Q6_V_hi_W(p21)));
+        acc22 = Q6_Vqf32_vadd_Vqf32Vqf32(acc22, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p22), Q6_V_hi_W(p22)));
+        acc23 = Q6_Vqf32_vadd_Vqf32Vqf32(acc23, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p23), Q6_V_hi_W(p23)));
+
+        // Process row 3
+        HVX_VectorPair p30 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv3), Q6_Vh_vshuff_Vh(yv0));
+        HVX_VectorPair p31 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv3), Q6_Vh_vshuff_Vh(yv1));
+        HVX_VectorPair p32 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv3), Q6_Vh_vshuff_Vh(yv2));
+        HVX_VectorPair p33 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv3), Q6_Vh_vshuff_Vh(yv3));
+
+        acc30 = Q6_Vqf32_vadd_Vqf32Vqf32(acc30, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p30), Q6_V_hi_W(p30)));
+        acc31 = Q6_Vqf32_vadd_Vqf32Vqf32(acc31, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p31), Q6_V_hi_W(p31)));
+        acc32 = Q6_Vqf32_vadd_Vqf32Vqf32(acc32, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p32), Q6_V_hi_W(p32)));
+        acc33 = Q6_Vqf32_vadd_Vqf32Vqf32(acc33, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p33), Q6_V_hi_W(p33)));
+    }
+
+    if (nloe) {
+        HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe * 2);
+
+        HVX_Vector xv0 = Q6_V_vand_QV(bmask, x0[nvec]);
+        HVX_Vector xv1 = Q6_V_vand_QV(bmask, x1[nvec]);
+        HVX_Vector xv2 = Q6_V_vand_QV(bmask, x2[nvec]);
+        HVX_Vector xv3 = Q6_V_vand_QV(bmask, x3[nvec]);
+
+        HVX_Vector yv0 = y0[nvec];
+        HVX_Vector yv1 = y1[nvec];
+        HVX_Vector yv2 = y2[nvec];
+        HVX_Vector yv3 = y3[nvec];
+
+        // Process row 0
+        HVX_VectorPair p00 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv0), Q6_Vh_vshuff_Vh(yv0));
+        HVX_VectorPair p01 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv0), Q6_Vh_vshuff_Vh(yv1));
+        HVX_VectorPair p02 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv0), Q6_Vh_vshuff_Vh(yv2));
+        HVX_VectorPair p03 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv0), Q6_Vh_vshuff_Vh(yv3));
+
+        acc00 = Q6_Vqf32_vadd_Vqf32Vqf32(acc00, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p00), Q6_V_hi_W(p00)));
+        acc01 = Q6_Vqf32_vadd_Vqf32Vqf32(acc01, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p01), Q6_V_hi_W(p01)));
+        acc02 = Q6_Vqf32_vadd_Vqf32Vqf32(acc02, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p02), Q6_V_hi_W(p02)));
+        acc03 = Q6_Vqf32_vadd_Vqf32Vqf32(acc03, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p03), Q6_V_hi_W(p03)));
+
+        // Process row 1
+        HVX_VectorPair p10 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv1), Q6_Vh_vshuff_Vh(yv0));
+        HVX_VectorPair p11 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv1), Q6_Vh_vshuff_Vh(yv1));
+        HVX_VectorPair p12 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv1), Q6_Vh_vshuff_Vh(yv2));
+        HVX_VectorPair p13 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv1), Q6_Vh_vshuff_Vh(yv3));
+
+        acc10 = Q6_Vqf32_vadd_Vqf32Vqf32(acc10, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p10), Q6_V_hi_W(p10)));
+        acc11 = Q6_Vqf32_vadd_Vqf32Vqf32(acc11, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p11), Q6_V_hi_W(p11)));
+        acc12 = Q6_Vqf32_vadd_Vqf32Vqf32(acc12, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p12), Q6_V_hi_W(p12)));
+        acc13 = Q6_Vqf32_vadd_Vqf32Vqf32(acc13, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p13), Q6_V_hi_W(p13)));
+
+        // Process row 2
+        HVX_VectorPair p20 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv2), Q6_Vh_vshuff_Vh(yv0));
+        HVX_VectorPair p21 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv2), Q6_Vh_vshuff_Vh(yv1));
+        HVX_VectorPair p22 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv2), Q6_Vh_vshuff_Vh(yv2));
+        HVX_VectorPair p23 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv2), Q6_Vh_vshuff_Vh(yv3));
+
+        acc20 = Q6_Vqf32_vadd_Vqf32Vqf32(acc20, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p20), Q6_V_hi_W(p20)));
+        acc21 = Q6_Vqf32_vadd_Vqf32Vqf32(acc21, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p21), Q6_V_hi_W(p21)));
+        acc22 = Q6_Vqf32_vadd_Vqf32Vqf32(acc22, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p22), Q6_V_hi_W(p22)));
+        acc23 = Q6_Vqf32_vadd_Vqf32Vqf32(acc23, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p23), Q6_V_hi_W(p23)));
+
+        // Process row 3
+        HVX_VectorPair p30 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv3), Q6_Vh_vshuff_Vh(yv0));
+        HVX_VectorPair p31 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv3), Q6_Vh_vshuff_Vh(yv1));
+        HVX_VectorPair p32 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv3), Q6_Vh_vshuff_Vh(yv2));
+        HVX_VectorPair p33 = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(xv3), Q6_Vh_vshuff_Vh(yv3));
+
+        acc30 = Q6_Vqf32_vadd_Vqf32Vqf32(acc30, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p30), Q6_V_hi_W(p30)));
+        acc31 = Q6_Vqf32_vadd_Vqf32Vqf32(acc31, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p31), Q6_V_hi_W(p31)));
+        acc32 = Q6_Vqf32_vadd_Vqf32Vqf32(acc32, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p32), Q6_V_hi_W(p32)));
+        acc33 = Q6_Vqf32_vadd_Vqf32Vqf32(acc33, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(p33), Q6_V_hi_W(p33)));
+    }
+
+    acc00 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc00));
+    acc01 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc01));
+    acc02 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc02));
+    acc03 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc03));
+
+    acc10 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc10));
+    acc11 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc11));
+    acc12 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc12));
+    acc13 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc13));
+
+    acc20 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc20));
+    acc21 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc21));
+    acc22 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc22));
+    acc23 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc23));
+
+    acc30 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc30));
+    acc31 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc31));
+    acc32 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc32));
+    acc33 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(acc33));
+
+    // accRC: Row R, Col C
+    // dC: Col C pointer
+    // dC[R]: Row R element
+
+    hvx_vec_store_u(&d0[0], 4, acc00);
+    hvx_vec_store_u(&d1[0], 4, acc01);
+    hvx_vec_store_u(&d2[0], 4, acc02);
+    hvx_vec_store_u(&d3[0], 4, acc03);
+
+    hvx_vec_store_u(&d0[1], 4, acc10);
+    hvx_vec_store_u(&d1[1], 4, acc11);
+    hvx_vec_store_u(&d2[1], 4, acc12);
+    hvx_vec_store_u(&d3[1], 4, acc13);
+
+    hvx_vec_store_u(&d0[2], 4, acc20);
+    hvx_vec_store_u(&d1[2], 4, acc21);
+    hvx_vec_store_u(&d2[2], 4, acc22);
+    hvx_vec_store_u(&d3[2], 4, acc23);
+
+    hvx_vec_store_u(&d0[3], 4, acc30);
+    hvx_vec_store_u(&d1[3], 4, acc31);
+    hvx_vec_store_u(&d2[3], 4, acc32);
+    hvx_vec_store_u(&d3[3], 4, acc33);
+}
+
 static void vec_dot_f16_f32(const int n, float * restrict s, const void * restrict x, const void * restrict y) {
     const HVX_UVector * restrict vx = (const HVX_UVector * restrict) x;
     const HVX_UVector * restrict vy = (const HVX_UVector * restrict) y;
@@ -952,6 +1184,40 @@ static void vec_dot_f16_f32(const int n, float * restrict s, const void * restri
 
     rsum = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(rsum));
     hvx_vec_store_u(&s[0], 4, rsum);
+}
+
+static inline void quantize_row_fp32_to_fp16_vtcm(const float * restrict x, void * restrict y, uint32_t n) {
+    assert((unsigned long) x % 128 == 0);
+    assert((unsigned long) y % 128 == 0);
+
+    const HVX_Vector * restrict vx = (const HVX_Vector *) x;
+    HVX_Vector * restrict vy       = (HVX_Vector *) y;
+
+    const HVX_Vector zero = Q6_V_vsplat_R(0);
+    uint32_t nvec = n / 64;
+    uint32_t nloe = n % 64;
+
+    for (uint32_t i = 0; i < nvec; i++) {
+        HVX_Vector x0 = vx[i * 2 + 0];
+        HVX_Vector x1 = vx[i * 2 + 1];
+
+        HVX_Vector x0_qf = Q6_Vqf32_vsub_VsfVsf(x0, zero);
+        HVX_Vector x1_qf = Q6_Vqf32_vsub_VsfVsf(x1, zero);
+
+        HVX_Vector y_hf = Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(x1_qf, x0_qf));
+        vy[i]           = y_hf;
+    }
+
+    if (nloe) {
+        HVX_Vector x0 = vx[nvec * 2 + 0];
+        HVX_Vector x1 = (nloe > 32) ? vx[nvec * 2 + 1] : zero;
+
+        HVX_Vector x0_qf = Q6_Vqf32_vsub_VsfVsf(x0, zero);
+        HVX_Vector x1_qf = Q6_Vqf32_vsub_VsfVsf(x1, zero);
+
+        HVX_Vector y_hf = Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(x1_qf, x0_qf));
+        hvx_vec_store_u(&vy[nvec], nloe * 2, y_hf);
+    }
 }
 
 #define htp_matmul_preamble            \
@@ -1423,9 +1689,7 @@ static void matmul_f16_f32(struct htp_ops_context * octx, uint32_t nth, uint32_t
     struct htp_spad * restrict src1_spad = &octx->src1_spad;
     struct htp_spad * restrict dst_spad  = &octx->dst_spad;
 
-    dma_queue *dma_queue = octx->ctx->dma[ith];
-
-    uint32_t src0_nrows_per_thread = octx->src0_nrows_per_thread;
+    dma_queue * dma_queue = octx->ctx->dma[ith];
 
     htp_matmul_preamble;
 
@@ -1435,7 +1699,8 @@ static void matmul_f16_f32(struct htp_ops_context * octx, uint32_t nth, uint32_t
     assert(ne12 % ne02 == 0);
     assert(ne13 % ne03 == 0);
 
-    // This is the size of the first dimension of the result, so we can iterate that way. (see the ASSERT above, these are the same numbers)
+    // This is the size of the first dimension of the result, so we can iterate that way. (see the ASSERT above, these
+    // are the same numbers)
     const uint32_t nr0 = ne0;
 
     // This is the size of the rest of the dimensions of the result
@@ -1465,38 +1730,245 @@ static void matmul_f16_f32(struct htp_ops_context * octx, uint32_t nth, uint32_t
         return;
     }
 
-    // block-tiling attempt
     const uint32_t blck_0 = 64;
     const uint32_t blck_1 = 64;
 
-    for (uint32_t iir1 = ir1_start; iir1 < ir1_end; iir1 += blck_1) {
-        for (uint32_t iir0 = ir0_start; iir0 < ir0_end; iir0 += blck_0) {
-            for (uint32_t ir1 = iir1; ir1 < MIN(iir1 + blck_1, ir1_end); ir1++) {
-                const uint32_t i13 = fastdiv(ir1, &octx->mm_div_ne12_ne1);
-                const uint32_t i12 = fastdiv(ir1 - i13 * ne12 * ne1, &octx->mm_div_ne1);
-                const uint32_t i11 = (ir1 - i13 * ne12 * ne1 - i12 * ne1);
+    const size_t src1_row_size_padded      = htp_round_up(nb11, 128);
+    const size_t src1_fp16_row_size_padded = htp_round_up(nb11 / 2, 128);
 
-                // broadcast src0 into src1
-                const uint32_t i03 = fastdiv(i13, &octx->mm_div_r3);
-                const uint32_t i02 = fastdiv(i12, &octx->mm_div_r2);
+    const size_t src1_fp32_size = htp_round_up(blck_1 * src1_row_size_padded, 256);
+    const size_t src1_fp16_size = htp_round_up(blck_1 * src1_fp16_row_size_padded, 256);
 
-                const uint32_t i1 = i11;
-                const uint32_t i2 = i12;
-                const uint32_t i3 = i13;
+    uint8_t * src1_fp32_buf = src1_spad->data + src1_spad->size_per_thread * ith;
+    uint8_t * src1_fp16_buf = src1_fp32_buf + src1_fp32_size;
 
-                const uint8_t * restrict src0_base = (const uint8_t *) src0->data + (0 + i02 * nb02 + i03 * nb03);
-                const uint8_t * restrict src1_col =
-                    (const uint8_t *) src1->data + (i11 * nb11 + i12 * nb12 + i13 * nb13);
-                float * dst_col = (float *) ((uint8_t * restrict) dst->data + (i1 * nb1 + i2 * nb2 + i3 * nb3));
+    uint8_t * spad_src0 = src0_spad->data + src0_spad->size_per_thread * ith;
 
-                const uint32_t ir0_block_end = MIN(iir0 + blck_0, ir0_end);
-                for (uint32_t ir0 = iir0; ir0 < ir0_block_end; ir0++) {
-                    // Use nb01 stride for non-contiguous src0 support
-                    const uint8_t * restrict src0_row = src0_base + ir0 * nb01;
-                    vec_dot_f16_f32(ne00, &dst_col[ir0], src0_row, src1_col);
+    // Loop over src1 blocks
+    // Ensure we don't cross broadcast boundaries (ne1)
+    // If broadcasting is involved (src0 depends on i12/i13), we must ensure i12/i13 are constant for the block.
+    // i12/i13 change when ir1 crosses ne1 (column index).
+    // So next boundary is multiples of ne1.
+    for (uint32_t iir1 = ir1_start; iir1 < ir1_end;) {
+        uint32_t next_boundary = (iir1 / ne1 + 1) * ne1;
+        uint32_t blck_1_actual = MIN(blck_1, ir1_end - iir1);
+        blck_1_actual          = MIN(blck_1_actual, next_boundary - iir1);
+
+        // Fetch src1 block (FP32)
+        // We iterate and push to DMA.
+        // We will store them contiguously in VTCM buffer with aligned stride.
+
+        for (uint32_t ir1_offset = 0; ir1_offset < blck_1_actual; ++ir1_offset) {
+            uint32_t       ir1 = iir1 + ir1_offset;
+            const uint32_t i13 = fastdiv(ir1, &octx->mm_div_ne12_ne1);
+            const uint32_t i12 = fastdiv(ir1 - i13 * ne12 * ne1, &octx->mm_div_ne1);
+            const uint32_t i11 = (ir1 - i13 * ne12 * ne1 - i12 * ne1);
+
+            const uint8_t * restrict src1_ptr = (const uint8_t *) src1->data + (i11 * nb11 + i12 * nb12 + i13 * nb13);
+            uint8_t *                dst_ptr  = src1_fp32_buf + ir1_offset * src1_row_size_padded;  // Padded Stride
+
+            dma_queue_push_ddr_to_vtcm(dma_queue, dma_make_ptr(dst_ptr, src1_ptr), src1_row_size_padded, nb11, 1);
+        }
+        dma_queue_wait(dma_queue);
+
+        // Convert FP32 -> FP16 in VTCM
+        for (uint32_t ir1_offset = 0; ir1_offset < blck_1_actual; ++ir1_offset) {
+            float *  src = (float *) (src1_fp32_buf + ir1_offset * src1_row_size_padded);
+            void *   dst = (void *) (src1_fp16_buf + ir1_offset * src1_fp16_row_size_padded);
+            uint32_t n   = ne10;  // K dimension
+            quantize_row_fp32_to_fp16_vtcm(src, dst, n);
+        }
+
+        const size_t src0_row_size_padded = htp_round_up(nb01, 128);
+
+        // Loop over src0 blocks
+        // We will double buffer src0 fetching.
+        // Actually, we can just process rows.
+        // We have `ir0_start` to `ir0_end`.
+        // We can process in chunks of 4 rows.
+
+        // Prefill src0
+        uint32_t iir0 = ir0_start;
+
+        // Process src0 rows in chunks of 4
+        for (; iir0 < ir0_end; iir0 += 4) {
+            uint32_t rows_to_process = MIN(4, ir0_end - iir0);
+
+            // Fetch these rows
+            for (uint32_t r = 0; r < rows_to_process; ++r) {
+                uint32_t       ir0 = iir0 + r;
+                const uint32_t i13 = fastdiv(iir1, &octx->mm_div_ne12_ne1);  // Use iir1's broadcast indices?
+                // Wait, src0 broadcast logic depends on ir1?
+                // No, src0 broadcasting depends on i12, i13 derived from ir1.
+                // If we block on ir1, i12 and i13 might change if block crosses boundary?
+                // Usually blocked on inner dimension.
+                // Let's re-evaluate broadcasting.
+                // i12, i13 are derived from ir1.
+                // i02, i03 are derived from i12, i13.
+                // If we process a block of ir1, we might have multiple i02/i03?
+                // If we reuse src1 block against src0 rows, we assume src0 rows are independent of src1?
+                // But `src0_base` depends on `i02`, `i03`.
+                // `i02` depends on `i12` (from `ir1`).
+                // So for different `ir1`, we might need different `src0` row!
+                // This breaks the "reuse src1 block against src0 block" optimization IF src0 depends on src1 index.
+                // This happens if we broadcast src0 along batch dimensions that match src1 batch dimensions.
+                // E.g. Batched MatMul.
+                // If we have standard MatMul (M,K) x (K,N) -> (M,N), no broadcast dependency.
+                // But GGML supports broadcasting.
+
+                // If `i02` and `i03` are constant for the whole `blck_1`, we are good.
+                // `blck_1` is 64. `ne1` (N) is typically large.
+                // If we iterate over N, `i12` and `i13` (batch indices) change only when N wraps?
+                // `ir1` covers `ne1 * ne12 * ne13`.
+                // `i11 = ir1 % (ne12*ne1) % ne1`. No.
+                // `i13 = ir1 / (ne12*ne1)`.
+                // `i12 = (ir1 / ne1) % ne12`.
+                // `i11 = ir1 % ne1`.
+                // So `i11` (column index) varies fastest.
+                // As long as `blck_1` stays within one batch (i.e. we don't cross `ne1` boundary), `i12` and `i13` are constant.
+                // `ne1` is usually large (vocab size, or hidden size).
+                // So `blck_1 = 64` is likely within same batch.
+                // We should ensure `blck_1` does not cross batch boundaries to optimize src0 reuse.
+                // Or we just handle it?
+                // If `src0_base` changes, we need to reload src0.
+                // But we want to load src0 ONCE and reuse for all src1 in block?
+                // No, we want to load SRC1 (weights) once, and reuse for all SRC0 (activations).
+                // SRC0 (M, K) usually doesn't depend on N (ir1).
+                // EXCEPT for broadcasting where src0 is smaller batch than src1.
+                // `i02 = i12 % ...`
+                // If `i12` is constant, `i02` is constant.
+                // So if we process a block of `ir1` that shares same `i12`, `i13`, then `src0` row selection is constant for that block.
+                // Then for each `ir0` (M dimension), we pick `src0` row.
+            }
+            // Okay, let's keep it simple for now.
+            // We load `src1` block.
+            // We iterate `ir0`.
+            // For each `ir0`, we need `src0` row.
+            // `src0_base` depends on `ir1`.
+            // If `ir1` block has mixed `i12/i13`, we have mixed `src0_base`.
+            // But `vec_dot` accumulates into `dst`.
+            // `dst[ir0]` (row ir0) for column `ir1`.
+            // The accumulation is over K.
+            // Result is `dst[ir0, ir1]`.
+            // We want to compute `dst[ir0..ir0+4, iir1..iir1+4]`.
+            // We need `src0[ir0..ir0+4]` and `src1[iir1..iir1+4]`.
+            // Does `src0` depend on `iir1`?
+            // Yes, via `src0_base`.
+            // But if `src0` is broadcasted, `src0_base` might point to same data for different `iir1`.
+            // If `src0` is (M,K,1,1) and `src1` is (N,K,B,B), then `src0` is reused for all B.
+            // If `src0` is (M,K,B,B) and `src1` is (N,K,B,B), then `src0` matches `src1`.
+            // In standard case, we assume `ne1` is large enough that 64 columns are in same batch.
+            // So `src0_base` is constant for the whole `src1` block.
+            // We can assert or handle this.
+            // Let's compute `src0_base` for the first element of `src1` block and assume it's same?
+            // Or better, check if block crosses boundary.
+            // If we split loops such that we iterate `i12`, `i13` in outer loops, we avoid this.
+            // But `matmul_f16_f32` iterates flat `ir1`.
+            // I will implement a check: if `src0_base` changes within `src1` block, we fallback or handle it (unlikely with small block size compared to ne1).
+            // Actually, we can just compute `src0_base` inside the `vec_dot` call?
+            // No, we want to prefetch `src0`.
+
+            // Let's fetch `src0` rows into VTCM.
+            // `src0` rows depend on `ir0` (varying) and `src0_base` (constant for block usually).
+            // We can fetch 4 rows of `src0`.
+
+            // Wait, `vec_dot_f16_f16_4x4` computes 4x4 block of `dst`.
+            // dst[r:r+4, c:c+4].
+            // It needs src0[r:r+4] and src1[c:c+4].
+            // We need to ensure src0[r] is the correct row corresponding to src1[c].
+            // If src0 depends on c (batch), then for different c in 4x4 block, we might need different src0?
+            // Only if batch changes within 4 columns. Very unlikely (ne1 >= 4 usually).
+
+            // So, for the inner loop, we assume `src0_base` is constant.
+            // We calculate `src0_base` from `iir1`.
+
+            uint32_t       first_ir1 = iir1;
+            const uint32_t i13       = fastdiv(first_ir1, &octx->mm_div_ne12_ne1);
+            const uint32_t i12       = fastdiv(first_ir1 - i13 * ne12 * ne1, &octx->mm_div_ne1);
+            const uint32_t i03       = fastdiv(i13, &octx->mm_div_r3);
+            const uint32_t i02       = fastdiv(i12, &octx->mm_div_r2);
+            const uint8_t * restrict src0_base = (const uint8_t *) src0->data + (0 + i02 * nb02 + i03 * nb03);
+
+            // Fetch `src0` rows [iir0, iir0+4).
+            // Double buffer?
+            // For simplicity, just fetch and process. 4 rows is small (4 * 2 * K bytes). 8KB for K=1024.
+
+            uint8_t * src0_vtcm_ptr = spad_src0;
+            for (uint32_t r = 0; r < rows_to_process; ++r) {
+                uint32_t ir0 = iir0 + r;
+                dma_queue_push_ddr_to_vtcm(dma_queue, dma_make_ptr(src0_vtcm_ptr + r * src0_row_size_padded, src0_base + ir0 * nb01), src0_row_size_padded, nb01, 1);
+            }
+            dma_queue_wait(dma_queue);
+
+            // Now we have src0 rows in VTCM (FP16).
+            // We have src1 rows in VTCM (FP16 converted).
+            // We can compute 4xN blocks.
+            // Iterate over `src1` chunks of 4.
+
+            for (uint32_t c = 0; c < blck_1_actual; c += 4) {
+                uint32_t cols_to_process = MIN(4, blck_1_actual - c);
+
+                // Pointers to VTCM
+                const void * vx = src0_vtcm_ptr;
+                const void * vy = src1_fp16_buf + c * src1_fp16_row_size_padded;
+
+                // Output pointers (DDR)
+                // dst is (ir0, ir1).
+                // dst_col = dst->data + (i1*nb1 + ...)
+                // We need to calculate dst pointer carefully.
+                // dst[iir0 + r, iir1 + c + cc]
+                // We need to pass `dst` pointer to kernel.
+                // Kernel takes `dst` and `dst_stride`.
+                // `dst` varies by `nb1` for each column (c).
+                // `dst` varies by `4 bytes` (float) for each row (r). (assuming contiguous inner dim 0).
+
+                // We need to compute `dst` address for (iir0, iir1 + c).
+                // And `dst_stride` corresponds to increment in `ir1`.
+
+                // Recompute dst address
+                // dst indices for (iir0, iir1+c)
+                uint32_t cur_ir1 = iir1 + c;
+                // indices i1, i2, i3
+                uint32_t ci13 = fastdiv(cur_ir1, &octx->mm_div_ne12_ne1);
+                uint32_t ci12 = fastdiv(cur_ir1 - ci13 * ne12 * ne1, &octx->mm_div_ne1);
+                uint32_t ci11 = (cur_ir1 - ci13 * ne12 * ne1 - ci12 * ne1);
+
+                float * dst_ptr = (float *) ((uint8_t *) dst->data + (ci11 * nb1 + ci12 * nb2 + ci13 * nb3)) + iir0;
+
+                // If cols_to_process < 4, we need to handle boundaries or pad?
+                // The kernel processes 4x4.
+                // We should add boundary checks in kernel or here.
+                // Or just use `vec_dot_f16_f16_4x4` which assumes valid pointers.
+                // We can point valid dummy buffers for out of bound reads.
+                // For writes, `dst` must be valid.
+                // If we are at edge, maybe fallback to scalar?
+                // Or just loop 1 by 1.
+
+                if (rows_to_process == 4 && cols_to_process == 4) {
+                    vec_dot_f16_f16_4x4(ne00, dst_ptr, nb1, vx, src0_row_size_padded, vy, src1_fp16_row_size_padded);
+                } else {
+                    // Fallback using vec_dot_f16_f16
+                    for (uint32_t r = 0; r < rows_to_process; ++r) {
+                        for (uint32_t cc = 0; cc < cols_to_process; ++cc) {
+                            // Recompute dst for this specific cell
+                            uint32_t cell_ir1 = iir1 + c + cc;
+                            uint32_t k13      = fastdiv(cell_ir1, &octx->mm_div_ne12_ne1);
+                            uint32_t k12      = fastdiv(cell_ir1 - k13 * ne12 * ne1, &octx->mm_div_ne1);
+                            uint32_t k11      = (cell_ir1 - k13 * ne12 * ne1 - k12 * ne1);
+                            float *  d        = (float *) ((uint8_t *) dst->data +
+                                                  (k11 * nb1 + k12 * nb2 + k13 * nb3)) +
+                                     (iir0 + r);
+
+                            const void * x_row = (const uint8_t *) vx + r * src0_row_size_padded;
+                            const void * y_row = (const uint8_t *) vy + cc * src1_fp16_row_size_padded;
+
+                            vec_dot_f16_f16(ne00, d, x_row, y_row);
+                        }
+                    }
                 }
             }
         }
+        iir1 += blck_1_actual;
     }
 
     t2 = HAP_perf_get_qtimer_count();
@@ -2031,7 +2503,27 @@ int op_matmul(struct htp_ops_context * octx) {
             // For all tensors we allocate N rows per thread, padded to HVX vector size
             octx->dst_spad.size_per_thread  = htp_round_up(HTP_SPAD_DST_NROWS * dst_row_size, 256);
             octx->src0_spad.size_per_thread = htp_round_up(HTP_SPAD_SRC0_NROWS * src0_row_size, 256);
-            octx->src1_spad.size_per_thread = htp_round_up(HTP_SPAD_SRC1_NROWS * src1_row_size, 256);
+
+            // Allocate enough space for FP32 weights chunk AND FP16 converted weights chunk.
+            // We use src1_spad for both if possible, or double allocate.
+            // Let's allocate enough for the block size we want to process.
+            // src1_row_size is FP32.
+            // We process blocks of 'src1_nrows' (tiled).
+            // Let's assume block size of 64 rows (HTP_SPAD_SRC1_NROWS is 16, maybe too small for tiling?)
+            // We will define block size in matmul function, but here we need allocation.
+            // Let's reserve enough for 64 rows of FP32 + 64 rows of FP16.
+            // 64 is a good chunk size.
+            // src1_row_size is in bytes (FP32).
+            {
+                size_t src1_block_rows      = 64;
+                size_t src1_row_size_padded = htp_round_up(src1_row_size, 128);
+                // We allocate enough for padded rows to ensure alignment in VTCM
+                size_t src1_fp32_size = htp_round_up(src1_block_rows * src1_row_size_padded, 256);
+                // For FP16, we also want aligned stride
+                size_t src1_fp16_row_size_padded = htp_round_up(src1_row_size / 2, 128);
+                size_t src1_fp16_size            = htp_round_up(src1_block_rows * src1_fp16_row_size_padded, 256);
+                octx->src1_spad.size_per_thread  = src1_fp32_size + src1_fp16_size;
+            }
 
             octx->src0_spad.size = octx->src0_spad.size_per_thread * octx->n_threads;
             octx->src1_spad.size = octx->src1_spad.size_per_thread * octx->n_threads;
