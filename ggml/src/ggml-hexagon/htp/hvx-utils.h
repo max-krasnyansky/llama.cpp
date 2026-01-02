@@ -985,6 +985,24 @@ static inline HVX_Vector hvx_vec_fast_sigmoid_fp32_guard(HVX_Vector v,
     return Q6_V_vmux_QVV(pred_min, out, Q6_V_vzero());
 }
 
+static inline HVX_Vector hvx_vec_tanh_fp32(HVX_Vector x) {
+    // tanh(x) = 2 * sigmoid(2x) - 1
+    HVX_Vector two = hvx_vec_splat_fp32(2.0f);
+    HVX_Vector one = hvx_vec_splat_fp32(1.0f);
+    HVX_Vector x2  = Q6_Vqf32_vmpy_VsfVsf(x, two);
+
+    static const float kMinExp = -87.f;  // 0
+    static const float kMaxExp = 87.f;   // 1
+    HVX_Vector max_exp = hvx_vec_splat_fp32(kMaxExp);
+    HVX_Vector min_exp = hvx_vec_splat_fp32(kMinExp);
+
+    HVX_Vector sig2x = hvx_vec_fast_sigmoid_fp32_guard(Q6_Vsf_equals_Vqf32(x2), one, max_exp, min_exp);
+
+    HVX_Vector res = Q6_Vqf32_vmpy_VsfVsf(sig2x, two);
+    res = Q6_Vqf32_vsub_Vqf32Vsf(res, one);
+    return Q6_Vsf_equals_Vqf32(res);
+}
+
 static inline void hvx_fast_sigmoid_f32(const uint8_t * restrict src, uint8_t * restrict dst, const int num_elems) {
     int step_of_1 = num_elems >> 5;
     int remaining = num_elems - step_of_1 * VLEN_FP32;

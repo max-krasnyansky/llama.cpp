@@ -246,18 +246,138 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
 
         const uint8_t * q_row_ptr = (const uint8_t *) q->data + (iq1*nbq1 + iq2*nbq2 + iq3*nbq3);
 
-        const __fp16 * mp;
+        const __fp16 * mp_base = NULL;
         if (mask) {
             // Mask offset calculation from ggml-cpu:
             // mask->data + iq1*mask->nb[1] + (iq2%mask->ne[2])*mask->nb[2] + (iq3%mask->ne[3])*mask->nb[3]
             // We need broadcasting indices.
             const uint32_t im2 = fastmodulo(iq2, mask->ne[2], &octx->src3_div2);
             const uint32_t im3 = fastmodulo(iq3, mask->ne[3], &octx->src3_div3);
-            mp = (const __fp16 *) ((const uint8_t *) mask->data + iq1*mask->nb[1] + im2*mask->nb[2] + im3*mask->nb[3]);
+            mp_base = (const __fp16 *) ((const uint8_t *) mask->data + iq1*mask->nb[1] + im2*mask->nb[2] + im3*mask->nb[3]);
         }
 
-        // Loop over KV
-        for (uint32_t ic = 0; ic < nek1; ++ic) {
+        uint32_t ic = 0;
+        // Process in blocks of 32 (VLEN_FP32)
+        for (; ic + VLEN_FP32 <= nek1; ic += VLEN_FP32) {
+            // 1. Compute scores
+            float scores_arr[VLEN_FP32];
+            for (int j = 0; j < VLEN_FP32; ++j) {
+                const uint32_t cur_ic = ic + j;
+                const uint8_t * k_ptr = (const uint8_t *) k->data + (cur_ic*nbk1 + ik2*nbk2 + ik3*nbk3);
+                if (q->type == HTP_TYPE_F32) {
+                    hvx_dot_f32_f16_uu(&scores_arr[j], q_row_ptr, k_ptr, DK, scale);
+                } else {
+                    hvx_dot_f16_f16_uu(&scores_arr[j], q_row_ptr, k_ptr, DK, scale);
+                }
+            }
+
+            HVX_Vector scores = *(HVX_UVector *) scores_arr;
+
+            // 2. Softcap
+            if (logit_softcap != 0.0f) {
+                // scores = logit_softcap * tanh(scores)
+                // Note: hvx_vec_tanh_fp32 uses sigmoid approximation
+                scores = hvx_vec_tanh_fp32(scores);
+                scores = Q6_Vqf32_vmpy_VsfVsf(scores, hvx_vec_splat_fp32(logit_softcap));
+                scores = Q6_Vsf_equals_Vqf32(scores);
+            }
+
+            // 3. Mask
+            if (mask) {
+                // Load 32 masks. mask is F16.
+                const __fp16 * mp = mp_base + ic;
+                // Load 32 fp16 -> convert to fp32
+                // Since mp might not be 128-byte aligned relative to VLEN, use unaligned load if needed?
+                // Actually we can just load 64 bytes (32 * 2).
+                // Assuming mp is at least 2-byte aligned.
+                // We need to expand 32 fp16 to 32 fp32.
+                // Q6_V_vzero()
+                // Use hvx_vec_i16_from_hf_rnd_sat inverse? No.
+                // Use built-in instructions to convert fp16 to fp32.
+
+                // Load 64 bytes
+                HVX_Vector m_vals_fp16 = *(const HVX_UVector *)mp;
+                // We only need the first 64 bytes if we loaded a full vector.
+                // Actually *(HVX_UVector*)mp loads 128 bytes. We only care about first 64 bytes (32 elements).
+                // Wait, VLEN=128 bytes = 64 fp16.
+                // We are processing 32 elements. So we use the first half of the vector.
+
+                // Convert first 32 FP16 to FP32
+                // We can use Q6_Vqf32_vsub_VsfVsf with zero to convert? No, that's for F32.
+                // We need Q6_Wqf32_vmpy_VhfVhf with 1.0 (splat 0x3c00).
+
+                HVX_Vector one_fp16 = Q6_Vh_vsplat_R(0x3c00);
+                // Multiply first 32 elements.
+                // Q6_Wqf32_vmpy_VhfVhf produces interleaved results (even/odd elements in separate vectors).
+                // Lo contains evens (0, 2, 4...) and Hi contains odds (1, 3, 5...).
+                // We need to shuffle them back to get 0, 1, 2...31.
+
+                HVX_VectorPair m_vals_fp32_pair = Q6_Wqf32_vmpy_VhfVhf(m_vals_fp16, one_fp16);
+                HVX_Vector m_vals_even = Q6_V_lo_W(m_vals_fp32_pair);
+                HVX_Vector m_vals_odd  = Q6_V_hi_W(m_vals_fp32_pair);
+
+                // Shuffle to interleave even and odd elements.
+                // Q6_W_vshuff_VVR takes two vectors and interleaves them based on element size (byte arg).
+                // -4 implies shuffling 4-byte (word) elements.
+                HVX_VectorPair shuffled = Q6_W_vshuff_VVR(m_vals_odd, m_vals_even, -4);
+
+                // The low part now contains elements 0, 1, 2... 31.
+                HVX_Vector m_vals_fp32 = Q6_V_lo_W(shuffled);
+                m_vals_fp32 = Q6_Vsf_equals_Vqf32(m_vals_fp32);
+
+                // scores += slope * mask
+                HVX_Vector slope_vec = hvx_vec_splat_fp32(slope);
+                HVX_Vector add_val = Q6_Vqf32_vmpy_VsfVsf(m_vals_fp32, slope_vec);
+                scores = Q6_Vqf32_vadd_VsfVsf(scores, Q6_Vsf_equals_Vqf32(add_val));
+                scores = Q6_Vsf_equals_Vqf32(scores);
+            }
+
+            // 4. Online Softmax Update
+            // Find max in scores
+            HVX_Vector v_max = hvx_vec_reduce_max_fp32(scores);
+            float m_block = hvx_vec_get_fp32(v_max);
+
+            float M_old = M;
+            float M_new = (m_block > M) ? m_block : M;
+            M = M_new;
+
+            float ms = expf(M_old - M_new);
+
+            // Update global accumulator
+            hvx_scale_f32((const uint8_t *) VKQ32, (uint8_t *) VKQ32, DV, ms);
+            S = S * ms;
+
+            // Compute exps: P = exp(scores - M_new)
+            HVX_Vector M_new_vec = hvx_vec_splat_fp32(M_new);
+            HVX_Vector scores_shifted = Q6_Vqf32_vsub_VsfVsf(scores, M_new_vec);
+            HVX_Vector P = hvx_vec_exp_fp32(Q6_Vsf_equals_Vqf32(scores_shifted));
+            P = Q6_Vsf_equals_Vqf32(P);
+
+            // Add to S
+            HVX_Vector p_sum_vec = hvx_vec_fp32_reduce_sum(P);
+            float p_sum = hvx_vec_get_fp32(p_sum_vec);
+            S += p_sum;
+
+            // 5. Accumulate V: VKQ32 += Sum(V[ic+j] * P[j])
+            // Store P to array to access scalars if needed, OR use splat
+            float p_arr[VLEN_FP32];
+            *(HVX_UVector*)p_arr = P;
+
+            // Optimized V accumulation
+            // We iterate DV in chunks of 32 (VLEN_FP32) because we can load 32 floats from VKQ32.
+            // But V is FP16. V[ic+j] is a row.
+            // We want to add P[j] * V[ic+j] to VKQ32.
+            // We can just iterate j=0..31
+            for (int j = 0; j < VLEN_FP32; ++j) {
+                const uint32_t cur_ic = ic + j;
+                const uint8_t * v_ptr = (const uint8_t *) v->data + (cur_ic*nbv1 + iv2*nbv2 + iv3*nbv3);
+                // P[j] is p_arr[j]
+                hvx_mad_f32_f16_au(VKQ32, v_ptr, DV, p_arr[j]);
+            }
+        }
+
+        // Leftover
+        for (; ic < nek1; ++ic) {
             float s_val;
 
             const uint8_t * k_ptr = (const uint8_t *) k->data + (ic*nbk1 + ik2*nbk2 + ik3*nbk3);
@@ -273,7 +393,7 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
             }
 
             if (mask) {
-                const float m_val = mp[ic];
+                const float m_val = mp_base[ic];
                 s_val += slope * m_val;
             }
 
