@@ -51,15 +51,8 @@ static int op_set_rows_worker(struct htp_ops_context * octx, const int ith, cons
                 // i11 = i02 % ne11
                 // i10 = i
 
-                // using simple modulo if dimensions mismatch, assuming broadcasting rules check passed in host
-                // Actually src1 dims: [ne01, ne02/ne11?, ne03/ne12?, 1] or similar
-                // CPU code:
-                // const int64_t i12 = i03%ne12;
-                // const int64_t i11 = i02%ne11;
-                // const int64_t i10 = i;
-
-                const uint32_t i12 = i03 % ne12;
-                const uint32_t i11 = i02 % ne11;
+                const uint32_t i12 = fastmodulo(i03, ne12, &octx->set_rows_div_ne12);
+                const uint32_t i11 = fastmodulo(i02, ne11, &octx->set_rows_div_ne11);
                 const uint32_t i10 = i;
 
                 const uintptr_t src1_addr = octx->src1.data + i10*nb10 + i11*nb11 + i12*nb12;

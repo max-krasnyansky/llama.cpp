@@ -513,6 +513,14 @@ static void proc_binary_req(struct htp_context * ctx, struct htp_general_req * r
     octx.dst.data  = (uint32_t) bufs[2].ptr;
     octx.n_threads = ctx->n_threads;
 
+    // Precompute fastdiv values for set_rows
+    if (octx.src1.ne[2] != 0) {
+        octx.set_rows_div_ne12 = init_fastdiv_values(octx.src1.ne[2]);
+    }
+    if (octx.src1.ne[1] != 0) {
+        octx.set_rows_div_ne11 = init_fastdiv_values(octx.src1.ne[1]);
+    }
+
     struct profile_data prof;
     profile_start(&prof);
 
