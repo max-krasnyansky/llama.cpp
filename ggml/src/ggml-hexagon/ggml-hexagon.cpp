@@ -2074,6 +2074,42 @@ static bool ggml_hexagon_supported_softmax(const struct ggml_hexagon_session * s
     return true;
 }
 
+static bool ggml_hexagon_supported_get_rows(const struct ggml_hexagon_session * sess, const struct ggml_tensor * op) {
+    const struct ggml_tensor * src0 = op->src[0];
+    const struct ggml_tensor * src1 = op->src[1];
+    const struct ggml_tensor * dst  = op;
+
+    if (!hex_supported_src0_type(src0->type)) {
+        return false;
+    }
+    if (!hex_supported_src1_type3(src1->type)) {
+        return false;
+    }
+    if (!hex_supported_dst_type(dst->type)) {
+        return false;
+    }
+
+    if (src0->nb[0] != ggml_type_size(src0->type)) {
+        return false;
+    }
+
+    // dst should be contiguous
+    if (!ggml_is_contiguous(dst)) {
+        return false;
+    }
+
+    if (!ggml_is_contiguous(src1)) {
+        return false;
+    }
+
+    // For now we don't support broadcasting for get_rows
+    if (ggml_nelements(src1) != ggml_nrows(dst)) {
+        return false;
+    }
+
+    return true;
+}
+
 static bool ggml_hexagon_supported_rope(const struct ggml_hexagon_session * sess, const struct ggml_tensor * op) {
     const int32_t * op_params = &op->op_params[0];
 
@@ -2360,6 +2396,17 @@ static inline size_t init_flash_attn_ext_req(htp_general_req * req, dspqueue_buf
     return n_bufs;
 }
 
+static inline size_t init_get_rows_req(htp_general_req * req, dspqueue_buffer * bufs, const ggml_tensor * t) {
+    req->op = HTP_OP_GET_ROWS;
+
+    size_t n_bufs = 0;
+    n_bufs += htp_req_buff_init(&req->src0, &bufs[n_bufs], t->src[0], DSPQBUF_TYPE_CONSTANT);
+    n_bufs += htp_req_buff_init(&req->src1, &bufs[n_bufs], t->src[1], DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
+    n_bufs += htp_req_buff_init(&req->dst,  &bufs[n_bufs], t,         DSPQBUF_TYPE_DSP_WRITE_CPU_READ);
+
+    return n_bufs;
+}
+
 static const char * ggml_backend_hexagon_name(ggml_backend_t backend) {
     auto sess = static_cast<ggml_hexagon_session *>(backend->context);
     return sess->name.c_str();
@@ -2470,6 +2517,10 @@ static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, gg
 
             case GGML_OP_FLASH_ATTN_EXT:
                 ggml_hexagon_dispatch_op<init_flash_attn_ext_req>(sess, node, flags);
+                break;
+
+            case GGML_OP_GET_ROWS:
+                ggml_hexagon_dispatch_op<init_get_rows_req>(sess, node, flags);
                 break;
 
             default:
@@ -2840,6 +2891,10 @@ static bool ggml_backend_hexagon_device_supports_op(ggml_backend_dev_t dev, cons
 
         case GGML_OP_FLASH_ATTN_EXT:
             supp = ggml_hexagon_supported_flash_attn_ext(sess, op);
+            break;
+
+        case GGML_OP_GET_ROWS:
+            supp = ggml_hexagon_supported_get_rows(sess, op);
             break;
 
         default:

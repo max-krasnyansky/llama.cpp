@@ -29,6 +29,7 @@ add_library(${HTP_LIB} SHARED
     act-ops.c
     rope-ops.c
     flash-attn-ops.c
+    get-rows-ops.c
 )
 
 target_compile_definitions(${HTP_LIB} PRIVATE
