@@ -2074,6 +2074,28 @@ static bool ggml_hexagon_supported_softmax(const struct ggml_hexagon_session * s
     return true;
 }
 
+static bool ggml_hexagon_supported_set_rows(const struct ggml_hexagon_session * sess, const struct ggml_tensor * op) {
+    const struct ggml_tensor * src0 = op->src[0]; // values
+    const struct ggml_tensor * src1 = op->src[1]; // indices
+    const struct ggml_tensor * dst  = op;
+
+    if (!hex_supported_src0_type(src0->type)) {
+        return false;
+    }
+    if (src1->type != GGML_TYPE_I32 && src1->type != GGML_TYPE_I64) {
+        return false;
+    }
+    if (!hex_supported_dst_type(dst->type)) {
+        return false;
+    }
+
+    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
+        return false;
+    }
+
+    return true;
+}
+
 static bool ggml_hexagon_supported_rope(const struct ggml_hexagon_session * sess, const struct ggml_tensor * op) {
     const int32_t * op_params = &op->op_params[0];
 
@@ -2280,6 +2302,25 @@ static inline size_t init_binary_id_req(htp_general_req * req, dspqueue_buffer *
     return n_bufs;
 }
 
+static inline size_t init_set_rows_req(htp_general_req * req, dspqueue_buffer * bufs, const ggml_tensor * t) {
+    req->op = HTP_OP_SET_ROWS;
+
+    // src0: Values (CPU write, DSP read)
+    // src1: Indices (CPU write, DSP read)
+    // dst: Destination (DSP write, CPU read) - also contains original data, so should be readable by DSP?
+    // Actually, DSP write buffers are usually not flushed from CPU cache if they are pure write.
+    // But SET_ROWS is an in-place modification of existing data.
+    // DSPQBUF_TYPE_DSP_WRITE_CPU_READ sets DSPQUEUE_BUFFER_FLAG_FLUSH_SENDER, which flushes CPU cache.
+    // So the DSP will see the initial content of dst. This is correct.
+
+    size_t n_bufs = 0;
+    n_bufs += htp_req_buff_init(&req->src0, &bufs[n_bufs], t->src[0], DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
+    n_bufs += htp_req_buff_init(&req->src1, &bufs[n_bufs], t->src[1], DSPQBUF_TYPE_CPU_WRITE_DSP_READ);
+    n_bufs += htp_req_buff_init(&req->dst,  &bufs[n_bufs], t,         DSPQBUF_TYPE_DSP_WRITE_CPU_READ);
+
+    return n_bufs;
+}
+
 static inline size_t init_unary_req(htp_general_req * req, dspqueue_buffer * bufs, const ggml_tensor * t) {
     memcpy(&req->op_params, &t->op_params, sizeof(t->op_params));
 
@@ -2470,6 +2511,10 @@ static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, gg
 
             case GGML_OP_FLASH_ATTN_EXT:
                 ggml_hexagon_dispatch_op<init_flash_attn_ext_req>(sess, node, flags);
+                break;
+
+            case GGML_OP_SET_ROWS:
+                ggml_hexagon_dispatch_op<init_set_rows_req>(sess, node, flags);
                 break;
 
             default:
@@ -2840,6 +2885,10 @@ static bool ggml_backend_hexagon_device_supports_op(ggml_backend_dev_t dev, cons
 
         case GGML_OP_FLASH_ATTN_EXT:
             supp = ggml_hexagon_supported_flash_attn_ext(sess, op);
+            break;
+
+        case GGML_OP_SET_ROWS:
+            supp = ggml_hexagon_supported_set_rows(sess, op);
             break;
 
         default:
