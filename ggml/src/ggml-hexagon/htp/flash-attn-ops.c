@@ -228,13 +228,16 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
     uint8_t * spad_v = octx->src2_spad.data + octx->src2_spad.size_per_thread * ith;
     uint8_t * spad_m = mask ? (octx->dst_spad.data + octx->dst_spad.size_per_thread * ith) : NULL;
 
-    const size_t size_k_block = htp_round_up(FLASH_ATTN_BLOCK_SIZE * DK * sizeof(__fp16), 128);
-    const size_t size_v_block = htp_round_up(FLASH_ATTN_BLOCK_SIZE * DV * sizeof(__fp16), 128);
-    const size_t size_m_block = htp_round_up(FLASH_ATTN_BLOCK_SIZE * sizeof(__fp16), 128);
-
     const size_t size_k_row = DK * sizeof(__fp16);
     const size_t size_v_row = DV * sizeof(__fp16);
     const size_t size_m_row = FLASH_ATTN_BLOCK_SIZE * sizeof(__fp16); // Treat block as one row for mask
+
+    const size_t size_k_row_padded = htp_round_up(size_k_row, 128);
+    const size_t size_v_row_padded = htp_round_up(size_v_row, 128);
+
+    const size_t size_k_block = size_k_row_padded * FLASH_ATTN_BLOCK_SIZE;
+    const size_t size_v_block = size_v_row_padded * FLASH_ATTN_BLOCK_SIZE;
+    const size_t size_m_block = htp_round_up(FLASH_ATTN_BLOCK_SIZE * sizeof(__fp16), 128);
 
     const uint32_t n_head = neq2;
     const uint32_t n_head_log2 = 1u << (uint32_t) floor(log2(n_head));
@@ -280,12 +283,12 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
             // K
             const uint8_t * k_src = (const uint8_t *) k->data + (ic_start*nbk1 + ik2*nbk2 + ik3*nbk3);
             uint8_t * k_dst = spad_k + (ib % 2) * size_k_block;
-            dma_queue_push(dma, dma_make_ptr(k_dst, k_src), size_k_row, nbk1, size_k_row, current_block_size);
+            dma_queue_push(dma, dma_make_ptr(k_dst, k_src), size_k_row_padded, nbk1, size_k_row, current_block_size);
 
             // V
             const uint8_t * v_src = (const uint8_t *) v->data + (ic_start*nbv1 + iv2*nbv2 + iv3*nbv3);
             uint8_t * v_dst = spad_v + (ib % 2) * size_v_block;
-            dma_queue_push(dma, dma_make_ptr(v_dst, v_src), size_v_row, nbv1, size_v_row, current_block_size);
+            dma_queue_push(dma, dma_make_ptr(v_dst, v_src), size_v_row_padded, nbv1, size_v_row, current_block_size);
 
             // Mask
             if (mask) {
@@ -319,7 +322,7 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
                 float __attribute__((aligned(VLEN))) scores_arr[VLEN_FP32];
                 for (int j = 0; j < VLEN_FP32; ++j) {
                     const uint32_t cur_ic = ic + j;
-                    const uint8_t * k_ptr = k_base + cur_ic * size_k_row;
+                    const uint8_t * k_ptr = k_base + cur_ic * size_k_row_padded;
                     if (q->type == HTP_TYPE_F32) {
                         hvx_dot_f32_f16_uu(&scores_arr[j], q_row_ptr, k_ptr, DK, scale);
                     } else {
@@ -379,7 +382,7 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
 
                 for (int j = 0; j < VLEN_FP32; ++j) {
                     const uint32_t cur_ic = ic + j;
-                    const uint8_t * v_ptr = v_base + cur_ic * size_v_row;
+                    const uint8_t * v_ptr = v_base + cur_ic * size_v_row_padded;
                     hvx_mad_f32_f16_au(VKQ32, v_ptr, DV, p_arr[j]);
                 }
             }
@@ -387,7 +390,7 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
             // Leftover
             for (; ic < current_block_size; ++ic) {
                 float s_val;
-                const uint8_t * k_ptr = k_base + ic * size_k_row;
+                const uint8_t * k_ptr = k_base + ic * size_k_row_padded;
 
                 if (q->type == HTP_TYPE_F32) {
                     hvx_dot_f32_f16_uu(&s_val, q_row_ptr, k_ptr, DK, scale);
@@ -416,7 +419,7 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
                     vs = expf(s_val - M);
                 }
 
-                const uint8_t * v_ptr = v_base + ic * size_v_row;
+                const uint8_t * v_ptr = v_base + ic * size_v_row_padded;
 
                 hvx_mad_f32_f16_au(VKQ32, v_ptr, DV, vs);
 
@@ -436,12 +439,12 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
                 // K
                 const uint8_t * k_src = (const uint8_t *) k->data + (next_ic_start*nbk1 + ik2*nbk2 + ik3*nbk3);
                 uint8_t * k_dst = spad_k + next_buf_idx * size_k_block;
-                dma_queue_push(dma, dma_make_ptr(k_dst, k_src), size_k_row, nbk1, size_k_row, next_block_size);
+                dma_queue_push(dma, dma_make_ptr(k_dst, k_src), size_k_row_padded, nbk1, size_k_row, next_block_size);
 
                 // V
                 const uint8_t * v_src = (const uint8_t *) v->data + (next_ic_start*nbv1 + iv2*nbv2 + iv3*nbv3);
                 uint8_t * v_dst = spad_v + next_buf_idx * size_v_block;
-                dma_queue_push(dma, dma_make_ptr(v_dst, v_src), size_v_row, nbv1, size_v_row, next_block_size);
+                dma_queue_push(dma, dma_make_ptr(v_dst, v_src), size_v_row_padded, nbv1, size_v_row, next_block_size);
 
                 // Mask
                 if (mask) {
@@ -526,8 +529,11 @@ int op_flash_attn_ext(struct htp_ops_context * octx) {
 
     size_t spad_size_vkq = htp_round_up(octx->src2.ne[0] * sizeof(float), 128); // VKQ32
 
-    size_t size_k_block = htp_round_up(FLASH_ATTN_BLOCK_SIZE * k->ne[0] * sizeof(__fp16), 128);
-    size_t size_v_block = htp_round_up(FLASH_ATTN_BLOCK_SIZE * v->ne[0] * sizeof(__fp16), 128);
+    size_t size_k_row_padded = htp_round_up(k->ne[0] * sizeof(__fp16), 128);
+    size_t size_v_row_padded = htp_round_up(v->ne[0] * sizeof(__fp16), 128);
+
+    size_t size_k_block = size_k_row_padded * FLASH_ATTN_BLOCK_SIZE;
+    size_t size_v_block = size_v_row_padded * FLASH_ATTN_BLOCK_SIZE;
     size_t size_m_block = htp_round_up(FLASH_ATTN_BLOCK_SIZE * sizeof(__fp16), 128);
 
     octx->src0_spad.size_per_thread = spad_size_vkq;
