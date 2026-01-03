@@ -907,6 +907,41 @@ static void vec_dot_mxfp4x4x2_q8x4x2_rx2(const int n,
     hvx_vec_store_u(&s[0], 8, Q6_V_lo_W(p0));
 }
 
+static void vec_dot_f16_f16(const int n, float * restrict s, const void * restrict vx, const void * restrict vy) {
+    const HVX_UVector * restrict v_x = (const HVX_UVector *) vx;
+    const HVX_UVector * restrict v_y = (const HVX_UVector *) vy;
+
+    uint32_t nvec = n / VLEN_FP16; // num full fp16 hvx vectors
+    uint32_t nloe = n % VLEN_FP16; // leftover elements
+
+    HVX_Vector rsum = Q6_V_vsplat_R(0);
+
+    uint32_t i = 0;
+
+    #pragma unroll(2)
+    for (i = 0; i < nvec; i++) {
+        HVX_Vector x_hf = v_x[i];
+        HVX_Vector y_hf = v_y[i];
+
+        HVX_VectorPair xy_qf = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(x_hf), y_hf);
+
+        rsum = Q6_Vqf32_vadd_Vqf32Vqf32(rsum, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy_qf),  Q6_V_hi_W(xy_qf)));
+    }
+
+    if (nloe) {
+        HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe * 2);
+        HVX_Vector x_hf = Q6_V_vand_QV(bmask, v_x[i]);
+        HVX_Vector y_hf = v_y[i]; // No need to mask y if x is masked (0 * anything = 0)
+
+        HVX_VectorPair xy_qf = Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(x_hf), y_hf);
+
+        rsum = Q6_Vqf32_vadd_Vqf32Vqf32(rsum, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy_qf),  Q6_V_hi_W(xy_qf)));
+    }
+
+    rsum = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(rsum));
+    hvx_vec_store_u(&s[0], 4, rsum);
+}
+
 static void vec_dot_f16_f32(const int n, float * restrict s, const void * restrict x, const void * restrict y) {
     const HVX_UVector * restrict vx = (const HVX_UVector * restrict) x;
     const HVX_UVector * restrict vy = (const HVX_UVector * restrict) y;
@@ -1421,11 +1456,8 @@ static void matmul_f16_f32(struct htp_ops_context * octx, uint32_t nth, uint32_t
     struct htp_tensor * restrict dst     = &octx->dst;
     struct htp_spad * restrict src0_spad = &octx->src0_spad;
     struct htp_spad * restrict src1_spad = &octx->src1_spad;
-    struct htp_spad * restrict dst_spad  = &octx->dst_spad;
 
     dma_queue *dma_queue = octx->ctx->dma[ith];
-
-    uint32_t src0_nrows_per_thread = octx->src0_nrows_per_thread;
 
     htp_matmul_preamble;
 
@@ -1465,38 +1497,93 @@ static void matmul_f16_f32(struct htp_ops_context * octx, uint32_t nth, uint32_t
         return;
     }
 
-    // block-tiling attempt
-    const uint32_t blck_0 = 64;
-    const uint32_t blck_1 = 64;
+    const uint32_t blck_0 = 32;
+    const uint32_t blck_1 = 32;
 
-    for (uint32_t iir1 = ir1_start; iir1 < ir1_end; iir1 += blck_1) {
+    uint8_t * restrict spad_src0_base = src0_spad->data + src0_spad->size_per_thread * ith;
+    uint8_t * restrict spad_src1_base = src1_spad->data + src1_spad->size_per_thread * ith;
+
+    size_t col_size_padded = htp_round_up(ne10 * 2, 128);
+    const size_t src0_row_size_padded = htp_round_up(nb01, 128);
+
+    for (uint32_t iir1 = ir1_start; iir1 < ir1_end; ) {
+        uint32_t next_boundary = (iir1 / ne1 + 1) * ne1;
+        uint32_t limit = MIN(ir1_end, next_boundary);
+        uint32_t effective_blck_1 = MIN(iir1 + blck_1, limit) - iir1;
+
+        for (uint32_t j = 0; j < effective_blck_1; ++j) {
+            uint32_t ir1 = iir1 + j;
+            const uint32_t i13 = fastdiv(ir1, &octx->mm_div_ne12_ne1);
+            const uint32_t i12 = fastdiv(ir1 - i13 * ne12 * ne1, &octx->mm_div_ne1);
+            const uint32_t i11 = (ir1 - i13 * ne12 * ne1 - i12 * ne1);
+
+            const uint8_t * src1_col = (const uint8_t *) src1->data + (i11 * nb11 + i12 * nb12 + i13 * nb13);
+            hvx_copy_fp16_fp32_uu(spad_src1_base + j * col_size_padded, src1_col, ne10);
+        }
+
+        const uint32_t i13 = fastdiv(iir1, &octx->mm_div_ne12_ne1);
+        const uint32_t i12 = fastdiv(iir1 - i13 * ne12 * ne1, &octx->mm_div_ne1);
+        const uint32_t i03 = fastdiv(i13, &octx->mm_div_r3);
+        const uint32_t i02 = fastdiv(i12, &octx->mm_div_r2);
+        const uint8_t * restrict src0_base = (const uint8_t *) src0->data + (0 + i02 * nb02 + i03 * nb03);
+
+        const int prefetch_rows = 16;
+
         for (uint32_t iir0 = ir0_start; iir0 < ir0_end; iir0 += blck_0) {
-            for (uint32_t ir1 = iir1; ir1 < MIN(iir1 + blck_1, ir1_end); ir1++) {
-                const uint32_t i13 = fastdiv(ir1, &octx->mm_div_ne12_ne1);
-                const uint32_t i12 = fastdiv(ir1 - i13 * ne12 * ne1, &octx->mm_div_ne1);
-                const uint32_t i11 = (ir1 - i13 * ne12 * ne1 - i12 * ne1);
+            uint32_t cur_blck_0 = MIN(blck_0, ir0_end - iir0);
 
-                // broadcast src0 into src1
-                const uint32_t i03 = fastdiv(i13, &octx->mm_div_r3);
-                const uint32_t i02 = fastdiv(i12, &octx->mm_div_r2);
+            uint32_t ir0 = iir0;
+            int rows_to_fetch = MIN(prefetch_rows, iir0 + cur_blck_0 - ir0);
 
-                const uint32_t i1 = i11;
-                const uint32_t i2 = i12;
-                const uint32_t i3 = i13;
+            if (rows_to_fetch > 0) {
+                 dma_queue_push_ddr_to_vtcm(dma_queue,
+                     dma_make_ptr(spad_src0_base, src0_base + ir0 * nb01),
+                     src0_row_size_padded, nb01, rows_to_fetch);
+            }
 
-                const uint8_t * restrict src0_base = (const uint8_t *) src0->data + (0 + i02 * nb02 + i03 * nb03);
-                const uint8_t * restrict src1_col =
-                    (const uint8_t *) src1->data + (i11 * nb11 + i12 * nb12 + i13 * nb13);
-                float * dst_col = (float *) ((uint8_t * restrict) dst->data + (i1 * nb1 + i2 * nb2 + i3 * nb3));
+            while (ir0 < iir0 + cur_blck_0) {
+                dma_queue_pop(dma_queue);
 
-                const uint32_t ir0_block_end = MIN(iir0 + blck_0, ir0_end);
-                for (uint32_t ir0 = iir0; ir0 < ir0_block_end; ir0++) {
-                    // Use nb01 stride for non-contiguous src0 support
-                    const uint8_t * restrict src0_row = src0_base + ir0 * nb01;
-                    vec_dot_f16_f32(ne00, &dst_col[ir0], src0_row, src1_col);
+                uint32_t current_chunk_size = rows_to_fetch;
+                uint32_t current_ir0_start = ir0;
+
+                ir0 += current_chunk_size;
+                rows_to_fetch = MIN(prefetch_rows, iir0 + cur_blck_0 - ir0);
+
+                uint8_t * current_spad_ptr = spad_src0_base;
+                if ((current_ir0_start - iir0) % (2 * prefetch_rows) != 0) {
+                     current_spad_ptr += prefetch_rows * src0_row_size_padded;
+                }
+
+                if (rows_to_fetch > 0) {
+                    uint8_t * next_spad_ptr = (current_spad_ptr == spad_src0_base) ?
+                        spad_src0_base + prefetch_rows * src0_row_size_padded : spad_src0_base;
+
+                    dma_queue_push_ddr_to_vtcm(dma_queue,
+                         dma_make_ptr(next_spad_ptr, src0_base + ir0 * nb01),
+                         src0_row_size_padded, nb01, rows_to_fetch);
+                }
+
+                for (int r = 0; r < current_chunk_size; ++r) {
+                    uint32_t rr = current_ir0_start + r;
+                    const uint8_t * src0_row_ptr = current_spad_ptr + r * src0_row_size_padded;
+
+                    for (uint32_t c = 0; c < effective_blck_1; ++c) {
+                        uint32_t cc = iir1 + c;
+
+                        uint32_t i13_c = fastdiv(cc, &octx->mm_div_ne12_ne1);
+                        uint32_t i12_c = fastdiv(cc - i13_c * ne12 * ne1, &octx->mm_div_ne1);
+                        uint32_t i11_c = (cc - i13_c * ne12 * ne1 - i12_c * ne1);
+
+                        float * dst_col = (float *) ((uint8_t *) dst->data + (i11_c * nb1 + i12_c * nb2 + i13_c * nb3));
+                        const uint8_t * src1_col_ptr = spad_src1_base + c * col_size_padded;
+
+                        vec_dot_f16_f16(ne00, &dst_col[rr], src0_row_ptr, src1_col_ptr);
+                    }
                 }
             }
         }
+        iir1 += effective_blck_1;
     }
 
     t2 = HAP_perf_get_qtimer_count();
@@ -2030,8 +2117,16 @@ int op_matmul(struct htp_ops_context * octx) {
 
             // For all tensors we allocate N rows per thread, padded to HVX vector size
             octx->dst_spad.size_per_thread  = htp_round_up(HTP_SPAD_DST_NROWS * dst_row_size, 256);
-            octx->src0_spad.size_per_thread = htp_round_up(HTP_SPAD_SRC0_NROWS * src0_row_size, 256);
-            octx->src1_spad.size_per_thread = htp_round_up(HTP_SPAD_SRC1_NROWS * src1_row_size, 256);
+            // src0: allocate space for 32 rows (for double buffering 16+16 or block of 32)
+            // In VTCM we pad rows to 128 bytes alignment
+            size_t src0_row_size_vtcm = htp_round_up(src0_row_size, 128);
+            octx->src0_spad.size_per_thread = htp_round_up(32 * src0_row_size_vtcm, 256);
+
+            // src1: allocate space for 32 columns (converted to FP16)
+            // src1 is FP32 in DDR. In VTCM it will be FP16, padded to 128 bytes.
+            // ne10 is the inner dimension.
+            size_t src1_col_size_vtcm = htp_round_up(ne10 * 2, 128);
+            octx->src1_spad.size_per_thread = htp_round_up(32 * src1_col_size_vtcm, 256);
 
             octx->src0_spad.size = octx->src0_spad.size_per_thread * octx->n_threads;
             octx->src1_spad.size = octx->src1_spad.size_per_thread * octx->n_threads;
