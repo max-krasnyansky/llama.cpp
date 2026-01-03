@@ -1501,25 +1501,15 @@ static void matmul_f16_f32(struct htp_ops_context * octx, uint32_t nth, uint32_t
     const uint32_t blck_1 = 32;
 
     uint8_t * restrict spad_src0_base = src0_spad->data + src0_spad->size_per_thread * ith;
-    uint8_t * restrict spad_src1_base = src1_spad->data + src1_spad->size_per_thread * ith;
+    uint8_t * restrict src1_data = src1_spad->data;
 
-    size_t col_size_padded = htp_round_up(ne10 * 2, 128);
+    const size_t src1_row_size_padded = htp_round_up(ne10 * 2, 128);
     const size_t src0_row_size_padded = htp_round_up(nb01, 128);
 
     for (uint32_t iir1 = ir1_start; iir1 < ir1_end; ) {
         uint32_t next_boundary = (iir1 / ne1 + 1) * ne1;
         uint32_t limit = MIN(ir1_end, next_boundary);
         uint32_t effective_blck_1 = MIN(iir1 + blck_1, limit) - iir1;
-
-        for (uint32_t j = 0; j < effective_blck_1; ++j) {
-            uint32_t ir1 = iir1 + j;
-            const uint32_t i13 = fastdiv(ir1, &octx->mm_div_ne12_ne1);
-            const uint32_t i12 = fastdiv(ir1 - i13 * ne12 * ne1, &octx->mm_div_ne1);
-            const uint32_t i11 = (ir1 - i13 * ne12 * ne1 - i12 * ne1);
-
-            const uint8_t * src1_col = (const uint8_t *) src1->data + (i11 * nb11 + i12 * nb12 + i13 * nb13);
-            hvx_copy_fp16_fp32_uu(spad_src1_base + j * col_size_padded, src1_col, ne10);
-        }
 
         const uint32_t i13 = fastdiv(iir1, &octx->mm_div_ne12_ne1);
         const uint32_t i12 = fastdiv(iir1 - i13 * ne12 * ne1, &octx->mm_div_ne1);
@@ -1576,7 +1566,7 @@ static void matmul_f16_f32(struct htp_ops_context * octx, uint32_t nth, uint32_t
                         uint32_t i11_c = (cc - i13_c * ne12 * ne1 - i12_c * ne1);
 
                         float * dst_col = (float *) ((uint8_t *) dst->data + (i11_c * nb1 + i12_c * nb2 + i13_c * nb3));
-                        const uint8_t * src1_col_ptr = spad_src1_base + c * col_size_padded;
+                        const uint8_t * src1_col_ptr = src1_data + cc * src1_row_size_padded;
 
                         vec_dot_f16_f16(ne00, &dst_col[rr], src0_row_ptr, src1_col_ptr);
                     }
@@ -1841,6 +1831,56 @@ static void quantize_fp32_q8x4x2(const struct htp_tensor * src,
 static void htp_quantize_fp32_q8x4x2(unsigned int n, unsigned int i, void * data) {
     struct htp_ops_context * octx = data;
     quantize_fp32_q8x4x2(&octx->src1, octx->src1_spad.data, &octx->src0_spad, n, i, octx->src1_nrows_per_thread);
+}
+
+static void quantize_row_fp32_fp16(float * restrict x, uint8_t * restrict y, uint32_t k) {
+    hvx_copy_fp16_fp32_uu(y, (const uint8_t *) x, k);
+}
+
+static void quantize_fp32_fp16(const struct htp_tensor * src,
+                                 uint8_t * restrict dst,
+                                 struct htp_spad * spad,
+                                 uint32_t          nth,
+                                 uint32_t          ith,
+                                 uint32_t          nrows_per_thread) {
+
+    uint64_t t1 = HAP_perf_get_qtimer_count();
+
+    const uint32_t ne0 = src->ne[0];
+    const uint32_t ne1 = src->ne[1];
+    const uint32_t ne2 = src->ne[2];
+    const uint32_t ne3 = src->ne[3];
+
+    const uint32_t nrows = ne1 * ne2 * ne3;                             // total n_rows
+
+    const uint32_t ir_first = nrows_per_thread * ith;                   // first row
+    const uint32_t ir_last  = MIN(ir_first + nrows_per_thread, nrows);  // last row
+
+    const size_t src_row_size = src->nb[1];
+    const size_t dst_row_size = htp_round_up(ne0 * 2, 128);
+
+    uint8_t * restrict src_data = (uint8_t *) src->data + (src_row_size * ir_first);
+    uint8_t * restrict dst_data = (uint8_t *) dst + (dst_row_size * ir_first);
+    uint8_t * restrict tmp_data = (uint8_t *) spad->data + (spad->size_per_thread * ith);
+
+    for (uint32_t i = ir_first; i < ir_last; ++i) {
+        htp_l2fetch(src_data, 2, src_row_size, src_row_size);
+        hvx_copy_fp32_au(tmp_data, src_data, ne0);
+
+        quantize_row_fp32_fp16((float *) tmp_data, dst_data, ne0);
+        dst_data += dst_row_size;
+        src_data += src_row_size;
+    }
+
+    uint64_t t2 = HAP_perf_get_qtimer_count();
+
+    FARF(HIGH, "quantize-fp32-fp16: %u/%u : n-rows %u (%u:%u) row-size %u -> %u usec %u\n", ith, nth, nrows, ir_first,
+         ir_last, src_row_size, dst_row_size, (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
+}
+
+static void htp_quantize_fp32_fp16(unsigned int n, unsigned int i, void * data) {
+    struct htp_ops_context * octx = data;
+    quantize_fp32_fp16(&octx->src1, octx->src1_spad.data, &octx->src0_spad, n, i, octx->src1_nrows_per_thread);
 }
 
 // ** matmul callbacks for worker_pool
@@ -2112,8 +2152,10 @@ int op_matmul(struct htp_ops_context * octx) {
 
         case HTP_TYPE_F16:
             op_type         = "f16-f32";
-            quant_job_func  = NULL;  // htp_quantize_f32_f16;
+            quant_job_func  = htp_quantize_fp32_fp16;
             matmul_job_func = htp_matmul_f16_f32;
+
+            src1_row_size = htp_round_up(ne10 * 2, 128);  // row size post quantization
 
             // For all tensors we allocate N rows per thread, padded to HVX vector size
             octx->dst_spad.size_per_thread  = htp_round_up(HTP_SPAD_DST_NROWS * dst_row_size, 256);
@@ -2122,14 +2164,18 @@ int op_matmul(struct htp_ops_context * octx) {
             size_t src0_row_size_vtcm = htp_round_up(src0_row_size, 128);
             octx->src0_spad.size_per_thread = htp_round_up(32 * src0_row_size_vtcm, 256);
 
-            // src1: allocate space for 32 columns (converted to FP16)
-            // src1 is FP32 in DDR. In VTCM it will be FP16, padded to 128 bytes.
-            // ne10 is the inner dimension.
-            size_t src1_col_size_vtcm = htp_round_up(ne10 * 2, 128);
-            octx->src1_spad.size_per_thread = htp_round_up(32 * src1_col_size_vtcm, 256);
+            // Entire src1 tensor is placed into the VTCM (converted to FP16)
+            octx->src1_spad.size_per_thread = htp_round_up(src1_row_size * src1_nrows, 256);
 
+            // src0 spad is also used in dynamic quantizer to store temp FP32 rows
+            // We must ensure it fits one FP32 row (ne10 * 4) aligned.
+            size_t src1_row_size_fp32_padded = htp_round_up(ne10 * 4, 128);
+            if (octx->src0_spad.size_per_thread < src1_row_size_fp32_padded) {
+                octx->src0_spad.size_per_thread = src1_row_size_fp32_padded;
+            }
+
+            octx->src1_spad.size = octx->src1_spad.size_per_thread; // Shared/Global
             octx->src0_spad.size = octx->src0_spad.size_per_thread * octx->n_threads;
-            octx->src1_spad.size = octx->src1_spad.size_per_thread * octx->n_threads;
             octx->dst_spad.size  = octx->dst_spad.size_per_thread * octx->n_threads;
 
             // FP16 matmul supports broadcast and needs fastdiv
@@ -2138,7 +2184,6 @@ int op_matmul(struct htp_ops_context * octx) {
             octx->mm_div_r2       = init_fastdiv_values(src1->ne[2] / src0->ne[2]);
             octx->mm_div_r3       = init_fastdiv_values(src1->ne[3] / src0->ne[3]);
 
-            need_quant = false;
             break;
 
         default:
