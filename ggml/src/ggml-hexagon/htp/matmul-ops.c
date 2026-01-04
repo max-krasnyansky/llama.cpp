@@ -907,6 +907,83 @@ static void vec_dot_mxfp4x4x2_q8x4x2_rx2(const int n,
     hvx_vec_store_u(&s[0], 8, Q6_V_lo_W(p0));
 }
 
+static void vec_dot_f16_f16(const int n, float * restrict s, const void * restrict vx, const void * restrict vy) {
+    const HVX_Vector * restrict x = (const HVX_Vector *) vx;
+    const HVX_Vector * restrict y = (const HVX_Vector *) vy;
+
+    uint32_t nvec = n / VLEN_FP16; // num full fp16 hvx vectors
+    uint32_t nloe = n % VLEN_FP16; // leftover elements
+
+    HVX_Vector rsum = Q6_V_vsplat_R(0);
+
+    uint32_t i = 0;
+
+    #pragma unroll(2)
+    for (i = 0; i < nvec; i++) {
+        HVX_VectorPair xy_qf = Q6_Wqf32_vmpy_VhfVhf(x[i], y[i]);
+        rsum = Q6_Vqf32_vadd_Vqf32Vqf32(rsum, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy_qf),  Q6_V_hi_W(xy_qf)));
+    }
+
+    if (nloe) {
+        HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe * 2);
+        HVX_Vector x_hf = Q6_V_vand_QV(bmask, x[i]);
+        HVX_Vector y_hf = y[i];
+
+        HVX_VectorPair xy_qf = Q6_Wqf32_vmpy_VhfVhf(x_hf, y_hf);
+        rsum = Q6_Vqf32_vadd_Vqf32Vqf32(rsum, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy_qf),  Q6_V_hi_W(xy_qf)));
+    }
+
+    rsum = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(rsum));
+    hvx_vec_store_u(&s[0], 4, rsum);
+}
+
+static void vec_dot_f16_f16_rx2(const int n,
+                                float * restrict s,
+                                const void * restrict vx,
+                                uint32_t vx_row_size,
+                                const void * restrict vy) {
+    const HVX_Vector * restrict x0 = (const HVX_Vector *) vx;
+    const HVX_Vector * restrict x1 = (const HVX_Vector *) ((const uint8_t *) vx + vx_row_size);
+    const HVX_Vector * restrict y  = (const HVX_Vector *) vy;
+
+    uint32_t nvec = n / VLEN_FP16;
+    uint32_t nloe = n % VLEN_FP16;
+
+    HVX_Vector rsum0 = Q6_V_vsplat_R(0);
+    HVX_Vector rsum1 = Q6_V_vsplat_R(0);
+
+    uint32_t i = 0;
+
+    #pragma unroll(2)
+    for (i = 0; i < nvec; i++) {
+        HVX_Vector y_hf = y[i];
+        HVX_VectorPair xy0_qf = Q6_Wqf32_vmpy_VhfVhf(x0[i], y_hf);
+        HVX_VectorPair xy1_qf = Q6_Wqf32_vmpy_VhfVhf(x1[i], y_hf);
+
+        rsum0 = Q6_Vqf32_vadd_Vqf32Vqf32(rsum0, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy0_qf), Q6_V_hi_W(xy0_qf)));
+        rsum1 = Q6_Vqf32_vadd_Vqf32Vqf32(rsum1, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy1_qf), Q6_V_hi_W(xy1_qf)));
+    }
+
+    if (nloe) {
+        HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe * 2);
+        HVX_Vector x0_hf = Q6_V_vand_QV(bmask, x0[i]);
+        HVX_Vector x1_hf = Q6_V_vand_QV(bmask, x1[i]);
+        HVX_Vector y_hf = y[i];
+
+        HVX_VectorPair xy0_qf = Q6_Wqf32_vmpy_VhfVhf(x0_hf, y_hf);
+        HVX_VectorPair xy1_qf = Q6_Wqf32_vmpy_VhfVhf(x1_hf, y_hf);
+
+        rsum0 = Q6_Vqf32_vadd_Vqf32Vqf32(rsum0, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy0_qf), Q6_V_hi_W(xy0_qf)));
+        rsum1 = Q6_Vqf32_vadd_Vqf32Vqf32(rsum1, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy1_qf), Q6_V_hi_W(xy1_qf)));
+    }
+
+    rsum0 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(rsum0));
+    rsum1 = Q6_Vsf_equals_Vqf32(hvx_vec_qf32_reduce_sum(rsum1));
+    HVX_VectorPair p0 = Q6_W_vshuff_VVR(rsum1, rsum0, 4);
+
+    hvx_vec_store_u(&s[0], 8, Q6_V_lo_W(p0));
+}
+
 static void vec_dot_f16_f32(const int n, float * restrict s, const void * restrict x, const void * restrict y) {
     const HVX_UVector * restrict vx = (const HVX_UVector * restrict) x;
     const HVX_UVector * restrict vy = (const HVX_UVector * restrict) y;
@@ -1751,6 +1828,61 @@ static void quantize_fp32_q8x4x2(const struct htp_tensor * src,
          ir_last, src_row_size, dst_row_size, (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
 }
 
+static void quantize_fp32_f16(const struct htp_tensor * src,
+                              uint8_t * restrict dst,
+                              uint32_t          nth,
+                              uint32_t          ith,
+                              uint32_t          nrows_per_thread) {
+
+    uint64_t t1 = HAP_perf_get_qtimer_count();
+
+    const uint32_t ne0 = src->ne[0];
+    const uint32_t ne1 = src->ne[1];
+    const uint32_t ne2 = src->ne[2];
+    const uint32_t ne3 = src->ne[3];
+
+    const uint32_t nrows = ne1 * ne2 * ne3;                             // total n_rows
+
+    const uint32_t ir_first = nrows_per_thread * ith;                   // first row
+    const uint32_t ir_last  = MIN(ir_first + nrows_per_thread, nrows);  // last row
+
+    const size_t src_row_size = src->nb[1];
+    const size_t dst_row_size = htp_round_up(ne0 * 2, 128);
+
+    uint8_t * restrict src_data = (uint8_t *) src->data + (src_row_size * ir_first);
+    uint8_t * restrict dst_data = (uint8_t *) dst + (dst_row_size * ir_first);
+
+    if (src->type == HTP_TYPE_F32) {
+        for (uint32_t i = ir_first; i < ir_last; ++i) {
+            htp_l2fetch(src_data, 2, src_row_size, src_row_size);
+            hvx_copy_fp16_fp32_ua(dst_data, src_data, ne0);
+
+            dst_data += dst_row_size;
+            src_data += src_row_size;
+        }
+    } else if (src->type == HTP_TYPE_F16) {
+        for (uint32_t i = ir_first; i < ir_last; ++i) {
+            htp_l2fetch(src_data, 2, src_row_size, src_row_size);
+            hvx_copy_fp16_ua(dst_data, src_data, ne0);
+
+            dst_data += dst_row_size;
+            src_data += src_row_size;
+        }
+    } else {
+        assert(0 && "unsupported src type");
+    }
+
+    uint64_t t2 = HAP_perf_get_qtimer_count();
+
+    FARF(HIGH, "quantize-fp32-f16: %u/%u : n-rows %u (%u:%u) row-size %u -> %u usec %u\n", ith, nth, nrows, ir_first,
+         ir_last, src_row_size, dst_row_size, (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
+}
+
+static void htp_quantize_fp32_f16(unsigned int n, unsigned int i, void * data) {
+    struct htp_ops_context * octx = data;
+    quantize_fp32_f16(&octx->src1, octx->src1_spad.data, n, i, octx->src1_nrows_per_thread);
+}
+
 static void htp_quantize_fp32_q8x4x2(unsigned int n, unsigned int i, void * data) {
     struct htp_ops_context * octx = data;
     quantize_fp32_q8x4x2(&octx->src1, octx->src1_spad.data, &octx->src0_spad, n, i, octx->src1_nrows_per_thread);
@@ -1825,6 +1957,30 @@ static void htp_matmul_mxfp4x4x2_q8x4x2(unsigned int n, unsigned int i, void * d
     mt.type        = "mxfp4x4x2-q8x4x2";
     mt.vec_dot     = vec_dot_mxfp4x4x2_q8x4x2;
     mt.vec_dot_rx2 = vec_dot_mxfp4x4x2_q8x4x2_rx2;
+
+    matmul(&mt, &octx->src0, &octx->src1, &octx->dst, &octx->src0_spad, &octx->src1_spad, &octx->dst_spad, n, i,
+           octx->src0_nrows_per_thread, octx->ctx->dma[i]);
+}
+
+static void htp_matvec_f16_f16(unsigned int n, unsigned int i, void * data) {
+    struct htp_ops_context * octx = data;
+
+    struct htp_matmul_type mt;
+    mt.type        = "f16-f16";
+    mt.vec_dot     = vec_dot_f16_f16;
+    mt.vec_dot_rx2 = vec_dot_f16_f16_rx2;
+
+    matvec(&mt, &octx->src0, &octx->src1, &octx->dst, &octx->src0_spad, &octx->src1_spad, &octx->dst_spad, n, i,
+           octx->src0_nrows_per_thread, octx->ctx->dma[i]);
+}
+
+static void htp_matmul_f16_f16(unsigned int n, unsigned int i, void * data) {
+    struct htp_ops_context * octx = data;
+
+    struct htp_matmul_type mt;
+    mt.type        = "f16-f16";
+    mt.vec_dot     = vec_dot_f16_f16;
+    mt.vec_dot_rx2 = vec_dot_f16_f16_rx2;
 
     matmul(&mt, &octx->src0, &octx->src1, &octx->dst, &octx->src0_spad, &octx->src1_spad, &octx->dst_spad, n, i,
            octx->src0_nrows_per_thread, octx->ctx->dma[i]);
@@ -2024,26 +2180,64 @@ int op_matmul(struct htp_ops_context * octx) {
             break;
 
         case HTP_TYPE_F16:
-            op_type         = "f16-f32";
-            quant_job_func  = NULL;  // htp_quantize_f32_f16;
-            matmul_job_func = htp_matmul_f16_f32;
+            {
+                // Try optimized f16-f16 path first (src1 in VTCM)
+                const size_t f16_src1_row_size = htp_round_up(ne10 * 2, 128);
+                const size_t f16_src1_spad_size = htp_round_up(f16_src1_row_size * src1_nrows, 256);
+                const size_t f16_src0_spad_size = htp_round_up(HTP_SPAD_SRC0_NROWS * src0_row_size_padded, 256) * octx->n_threads;
+                const size_t f16_dst_spad_size  = htp_round_up(HTP_SPAD_DST_NROWS * dst_row_size, 256) * octx->n_threads;
 
-            // For all tensors we allocate N rows per thread, padded to HVX vector size
-            octx->dst_spad.size_per_thread  = htp_round_up(HTP_SPAD_DST_NROWS * dst_row_size, 256);
-            octx->src0_spad.size_per_thread = htp_round_up(HTP_SPAD_SRC0_NROWS * src0_row_size, 256);
-            octx->src1_spad.size_per_thread = htp_round_up(HTP_SPAD_SRC1_NROWS * src1_row_size, 256);
+                const size_t f16_total_size = f16_src1_spad_size + f16_src0_spad_size + f16_dst_spad_size;
 
-            octx->src0_spad.size = octx->src0_spad.size_per_thread * octx->n_threads;
-            octx->src1_spad.size = octx->src1_spad.size_per_thread * octx->n_threads;
-            octx->dst_spad.size  = octx->dst_spad.size_per_thread * octx->n_threads;
+                // Generic matmul implementation does not support multi-batch src0 (N-vs-N broadcasting).
+                // It only supports 1-vs-N broadcasting (src0 is 2D) or standard 2D matmul.
+                const bool is_src0_batched = (ne02 > 1) || (ne03 > 1);
 
-            // FP16 matmul supports broadcast and needs fastdiv
-            octx->mm_div_ne12_ne1 = init_fastdiv_values(src1->ne[2] * dst->ne[1]);
-            octx->mm_div_ne1      = init_fastdiv_values(dst->ne[1]);
-            octx->mm_div_r2       = init_fastdiv_values(src1->ne[2] / src0->ne[2]);
-            octx->mm_div_r3       = init_fastdiv_values(src1->ne[3] / src0->ne[3]);
+                if (!is_src0_batched && f16_total_size <= octx->ctx->vtcm_size) {
+                    // Optimized path
+                    op_type        = "f16-f16";
+                    quant_job_func = htp_quantize_fp32_f16;
+                    if (src1_nrows > 1) {
+                        matmul_job_func = htp_matmul_f16_f16;
+                    } else {
+                        matmul_job_func = htp_matvec_f16_f16;
+                    }
 
-            need_quant = false;
+                    src1_row_size = f16_src1_row_size;
+
+                    octx->dst_spad.size_per_thread  = htp_round_up(HTP_SPAD_DST_NROWS * dst_row_size, 256);
+                    octx->src0_spad.size_per_thread = htp_round_up(HTP_SPAD_SRC0_NROWS * src0_row_size_padded, 256);
+                    octx->src1_spad.size_per_thread = htp_round_up(src1_row_size * src1_nrows, 256);
+
+                    octx->src1_spad.size = octx->src1_spad.size_per_thread;
+                    octx->src0_spad.size = octx->src0_spad.size_per_thread * octx->n_threads;
+                    octx->dst_spad.size  = octx->dst_spad.size_per_thread * octx->n_threads;
+                } else {
+                    // Fallback to f16-f32 (DDR) if src1 doesn't fit in VTCM or broadcasting is required
+                    op_type         = "f16-f32";
+                    quant_job_func  = NULL;
+                    matmul_job_func = htp_matmul_f16_f32;
+
+                    // Revert src1_row_size to nb11 (src1 in DDR)
+                    src1_row_size = nb11;
+
+                    octx->dst_spad.size_per_thread  = htp_round_up(HTP_SPAD_DST_NROWS * dst_row_size, 256);
+                    octx->src0_spad.size_per_thread = htp_round_up(HTP_SPAD_SRC0_NROWS * src0_row_size, 256);
+                    octx->src1_spad.size_per_thread = htp_round_up(HTP_SPAD_SRC1_NROWS * src1_row_size, 256);
+
+                    octx->src0_spad.size = octx->src0_spad.size_per_thread * octx->n_threads;
+                    octx->src1_spad.size = octx->src1_spad.size_per_thread * octx->n_threads;
+                    octx->dst_spad.size  = octx->dst_spad.size_per_thread * octx->n_threads;
+
+                    // Init fastdiv for old path (supports broadcasting)
+                    octx->mm_div_ne12_ne1 = init_fastdiv_values(src1->ne[2] * dst->ne[1]);
+                    octx->mm_div_ne1      = init_fastdiv_values(dst->ne[1]);
+                    octx->mm_div_r2       = init_fastdiv_values(src1->ne[2] / src0->ne[2]);
+                    octx->mm_div_r3       = init_fastdiv_values(src1->ne[3] / src0->ne[3]);
+
+                    need_quant = false;
+                }
+            }
             break;
 
         default:
