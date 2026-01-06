@@ -1,7 +1,8 @@
 #ifndef HVX_COPY_H
 #define HVX_COPY_H
 
-#include "ops-utils.h"
+#include <hexagon_types.h>
+#include <hexagon_protos.h>
 
 #include <assert.h>
 #include <stddef.h>
@@ -45,174 +46,127 @@ static inline void hvx_vec_store_a(void * ptr, size_t n, HVX_Vector v) {
     Q6_vmem_QnRIV(ql_not, (HVX_Vector *) ptr, v);
 }
 
-// copy n fp16 elements : source and destination are aligned to HVX Vector (128)
-static inline void hvx_copy_fp16_aa(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n) {
+// Common copy routines
+static inline void hvx_copy_common_aa(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n, uint32_t elem_size) {
     HVX_Vector * restrict vdst = (HVX_Vector *) dst;
     HVX_Vector * restrict vsrc = (HVX_Vector *) src;
 
     assert((unsigned long) dst % 128 == 0);
     assert((unsigned long) src % 128 == 0);
 
-    uint32_t nvec = n / 64;
-    uint32_t nloe = n % 64;
+    uint32_t elems_per_vec = 128 / elem_size;
+    uint32_t nvec = n / elems_per_vec;
+    uint32_t nloe = n % elems_per_vec;
 
     uint32_t i = 0;
 
     #pragma unroll(4)
     for (; i < nvec; i++) {
-        HVX_Vector v = vsrc[i];
-        vdst[i]      = v;
+        vdst[i] = vsrc[i];
     }
 
     if (nloe) {
-        HVX_Vector v = vsrc[i];
-        hvx_vec_store_u((void *) &vdst[i], nloe * sizeof(__fp16), v);
+        hvx_vec_store_u((void *) &vdst[i], nloe * elem_size, vsrc[i]);
     }
+}
+
+static inline void hvx_copy_common_ua(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n, uint32_t elem_size) {
+    HVX_UVector * restrict vdst = (HVX_UVector *) dst;
+    HVX_Vector * restrict vsrc  = (HVX_Vector *) src;
+
+    assert((unsigned long) src % 128 == 0);
+
+    uint32_t elems_per_vec = 128 / elem_size;
+    uint32_t nvec = n / elems_per_vec;
+    uint32_t nloe = n % elems_per_vec;
+
+    uint32_t i = 0;
+
+    #pragma unroll(4)
+    for (; i < nvec; i++) {
+        vdst[i] = vsrc[i];
+    }
+
+    if (nloe) {
+        hvx_vec_store_u((void *) &vdst[i], nloe * elem_size, vsrc[i]);
+    }
+}
+
+static inline void hvx_copy_common_au(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n, uint32_t elem_size) {
+    HVX_Vector * restrict vdst  = (HVX_Vector *) dst;
+    HVX_UVector * restrict vsrc = (HVX_UVector *) src;
+
+    assert((unsigned long) dst % 128 == 0);
+
+    uint32_t elems_per_vec = 128 / elem_size;
+    uint32_t nvec = n / elems_per_vec;
+    uint32_t nloe = n % elems_per_vec;
+
+    uint32_t i = 0;
+
+    #pragma unroll(4)
+    for (; i < nvec; i++) {
+        vdst[i] = vsrc[i];
+    }
+
+    if (nloe) {
+        hvx_vec_store_u((void *) &vdst[i], nloe * elem_size, vsrc[i]);
+    }
+}
+
+static inline void hvx_copy_common_uu(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n, uint32_t elem_size) {
+    HVX_UVector * restrict vdst = (HVX_UVector *) dst;
+    HVX_UVector * restrict vsrc = (HVX_UVector *) src;
+
+    uint32_t elems_per_vec = 128 / elem_size;
+    uint32_t nvec = n / elems_per_vec;
+    uint32_t nloe = n % elems_per_vec;
+
+    uint32_t i = 0;
+
+    #pragma unroll(4)
+    for (; i < nvec; i++) {
+        vdst[i] = vsrc[i];
+    }
+
+    if (nloe) {
+        hvx_vec_store_u((void *) &vdst[i], nloe * elem_size, vsrc[i]);
+    }
+}
+
+// copy n fp16 elements : source and destination are aligned to HVX Vector (128)
+static inline void hvx_copy_fp16_aa(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n) {
+    hvx_copy_common_aa(dst, src, n, sizeof(__fp16));
 }
 
 // copy n fp16 elements : source is aligned, destination is potentially unaligned
 static inline void hvx_copy_fp16_ua(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n) {
-    HVX_UVector * restrict vdst = (HVX_UVector *) dst;
-    HVX_Vector * restrict vsrc  = (HVX_Vector *) src;
-
-    assert((unsigned long) src % 128 == 0);
-
-    uint32_t nvec = n / 64;
-    uint32_t nloe = n % 64;
-
-    uint32_t i = 0;
-
-    #pragma unroll(4)
-    for (; i < nvec; i++) {
-        HVX_Vector v = vsrc[i];
-        vdst[i]      = v;
-    }
-
-    if (nloe) {
-        HVX_Vector v = vsrc[i];
-        hvx_vec_store_u((void *) &vdst[i], nloe * sizeof(__fp16), v);
-    }
+    hvx_copy_common_ua(dst, src, n, sizeof(__fp16));
 }
 
 // copy n fp16 elements : source is aligned, destination is potentially unaligned
 static inline void hvx_copy_fp16_au(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n) {
-    HVX_Vector * restrict vdst  = (HVX_Vector *) dst;
-    HVX_UVector * restrict vsrc = (HVX_UVector *) src;
-
-    assert((unsigned long) dst % 128 == 0);
-
-    uint32_t nvec = n / 64;
-    uint32_t nloe = n % 64;
-
-    uint32_t i = 0;
-
-    #pragma unroll(4)
-    for (; i < nvec; i++) {
-        HVX_Vector v = vsrc[i];
-        vdst[i]      = v;
-    }
-
-    if (nloe) {
-        HVX_Vector v = vsrc[i];
-        hvx_vec_store_u((void *) &vdst[i], nloe * sizeof(__fp16), v);
-    }
+    hvx_copy_common_au(dst, src, n, sizeof(__fp16));
 }
 
 // copy n fp32 elements : source and destination are aligned to HVX Vector (128)
 static inline void hvx_copy_fp32_aa(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n) {
-    HVX_Vector * restrict vdst = (HVX_Vector *) dst;
-    HVX_Vector * restrict vsrc = (HVX_Vector *) src;
-
-    assert((unsigned long) dst % 128 == 0);
-    assert((unsigned long) src % 128 == 0);
-
-    uint32_t nvec = n / 32;
-    uint32_t nloe = n % 32;
-
-    uint32_t i = 0;
-
-    #pragma unroll(4)
-    for (; i < nvec; i++) {
-        HVX_Vector v = vsrc[i];
-        vdst[i]      = v;
-    }
-
-    if (nloe) {
-        HVX_Vector v = vsrc[i];
-        hvx_vec_store_u((void *) &vdst[i], nloe * sizeof(float), v);
-    }
+    hvx_copy_common_aa(dst, src, n, sizeof(float));
 }
 
 // copy n fp32 elements : source is aligned, destination is unaligned
 static inline void hvx_copy_fp32_ua(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n) {
-    HVX_UVector * restrict vdst = (HVX_UVector *) dst;
-    HVX_Vector * restrict vsrc  = (HVX_Vector *) src;
-
-    assert((unsigned long) src % 128 == 0);
-
-    uint32_t nvec = n / 32;
-    uint32_t nloe = n % 32;
-
-    uint32_t i = 0;
-
-    #pragma unroll(4)
-    for (; i < nvec; i++) {
-        HVX_Vector v = vsrc[i];
-        vdst[i]      = v;
-    }
-
-    if (nloe) {
-        HVX_Vector v = vsrc[i];
-        hvx_vec_store_u((void *) &vdst[i], nloe * sizeof(float), v);
-    }
+    hvx_copy_common_ua(dst, src, n, sizeof(float));
 }
 
 // copy n fp32 elements : source is unaligned, destination is aligned
 static inline void hvx_copy_fp32_au(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n) {
-    HVX_Vector * restrict vdst  = (HVX_Vector *) dst;
-    HVX_UVector * restrict vsrc = (HVX_UVector *) src;
-
-    assert((unsigned long) dst % 128 == 0);
-
-    uint32_t nvec = n / 32;
-    uint32_t nloe = n % 32;
-
-    uint32_t i = 0;
-
-    #pragma unroll(4)
-    for (; i < nvec; i++) {
-        HVX_Vector v = vsrc[i];
-        vdst[i]      = v;
-    }
-
-    if (nloe) {
-        HVX_Vector v = vsrc[i];
-        hvx_vec_store_u((void *) &vdst[i], nloe * sizeof(float), v);
-    }
+    hvx_copy_common_au(dst, src, n, sizeof(float));
 }
 
 // copy n fp32 elements : source is unaligned, destination unaligned
 static inline void hvx_copy_fp32_uu(uint8_t * restrict dst, const uint8_t * restrict src, uint32_t n) {
-    HVX_UVector * restrict vdst = (HVX_UVector *) dst;
-    HVX_UVector * restrict vsrc = (HVX_UVector *) src;
-
-    assert((unsigned long) dst % 128 == 0);
-
-    uint32_t nvec = n / 32;
-    uint32_t nloe = n % 32;
-
-    uint32_t i = 0;
-
-    #pragma unroll(4)
-    for (; i < nvec; i++) {
-        HVX_Vector v = vsrc[i];
-        vdst[i]      = v;
-    }
-
-    if (nloe) {
-        HVX_Vector v = vsrc[i];
-        hvx_vec_store_u((void *) &vdst[i], nloe * sizeof(float), v);
-    }
+    hvx_copy_common_uu(dst, src, n, sizeof(float));
 }
 
 // copy/convert n fp32 elements into n fp16 elements : source is unaligned, destination is unaligned
