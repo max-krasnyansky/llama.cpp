@@ -275,8 +275,9 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
 
     const uint32_t n_head = neq2;
     const uint32_t n_head_log2 = 1u << (uint32_t) floor(log2(n_head));
-    const float m0 = powf(2.0f, -(max_bias       ) / n_head_log2);
-    const float m1 = powf(2.0f, -(max_bias / 2.0f) / n_head_log2);
+    // ln(2) = 0.69314718056f
+    const float ln_m0 = -(max_bias       ) / n_head_log2 * 0.69314718056f;
+    const float ln_m1 = -(max_bias / 2.0f) / n_head_log2 * 0.69314718056f;
 
     for (uint32_t ir = ir0; ir < ir1; ++ir) {
         const uint32_t iq3 = fastdiv(ir, &octx->src0_div21);
@@ -294,8 +295,17 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
         dma_queue_push(dma, dma_make_ptr(spad_q, q_row_ptr), size_q_row_padded, nbq1, size_q_row, 1);
 
         const uint32_t h = iq2; // head index
-        const float slope = (max_bias > 0.0f) ? (h < n_head_log2 ? powf(m0, h + 1) : powf(m1, 2*(h - n_head_log2) + 1)) : 1.0f;
-        HVX_Vector v_slope = hvx_vec_splat_fp32(slope);
+        // Calculate slope exponent: ln(slope)
+        float slope_exp = 0.0f;
+        if (max_bias > 0.0f) {
+            if (h < n_head_log2) {
+                slope_exp = (h + 1) * ln_m0;
+            } else {
+                slope_exp = (2*(h - n_head_log2) + 1) * ln_m1;
+            }
+        }
+        // slope = exp(slope_exp)
+        HVX_Vector v_slope = hvx_vec_exp_fp32(hvx_vec_splat_fp32(slope_exp));
 
         HVX_Vector vS = hvx_vec_splat_fp32(0.0f);
         HVX_Vector vM = hvx_vec_splat_fp32(-INFINITY);
@@ -514,7 +524,7 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
         // But we want 0.
         // Actually, if S=0, S_inv = 0.
         HVX_Vector zero = Q6_V_vsplat_R(0);
-        HVX_VectorPred s_is_zero = Q6_Q_vcmp_eq_VsfVsf(vS, zero);
+        HVX_VectorPred s_is_zero = Q6_Q_vcmp_eq_VwVw(vS, zero);
         vS_inv = Q6_V_vmux_QVV(s_is_zero, zero, vS_inv);
 
         hvx_scale_f32_aa_vec((uint8_t *) VKQ32, (const uint8_t *) VKQ32, DV, vS_inv);
