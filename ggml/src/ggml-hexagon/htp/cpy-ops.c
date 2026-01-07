@@ -50,19 +50,94 @@ static int cpy_thread_f32_f32(struct htp_ops_context * octx, const int nth, cons
     const uint32_t ir0 = dr * ith;
     const uint32_t ir1 = (ir0 + dr < nr) ? (ir0 + dr) : nr;
 
-    // Check if we can do a simple copy (ne00 == ne0, contiguous row copy)
-    // If not, we might need element-wise loop, but hvx_copy_fp32_uu handles arbitrary size n.
-    // The main complexity is coordinate mapping for broadcasting.
+    const bool reshape = (octx->flags & 0x80000000) != 0;
 
-    // If src0 dims are 1, we broadcast.
-    // i_src = i_dst % src_dim. If src_dim == 1, i_src = 0.
-    // fastmodulo handles (i_dst, src_dim, div).
-    // If src_dim == dst_dim, i_src = i_dst (no modulo needed if they match).
-    // But generalized: i_src = fastmodulo(i_dst, src_dim, div)
+    if (reshape) {
+        // Reshape mode: linear copy by unraveling dst index to src coords
+        // Check if src is contiguous
+        const bool src_cont = (nb00 == sizeof(float)) &&
+                              (nb01 == ne00 * sizeof(float)) &&
+                              (nb02 == ne01 * ne00 * sizeof(float)) &&
+                              (nb03 == ne02 * ne01 * ne00 * sizeof(float));
 
-    // Optimization: if dim matches, avoid modulo.
-    // If dim is 1, index is always 0.
+        for (uint32_t i3 = 0; i3 < ne3; ++i3) {
+            for (uint32_t i2 = 0; i2 < ne2; ++i2) {
+                for (uint32_t i1 = ir0; i1 < ir1; ++i1) {
+                    const uintptr_t dst_row_ptr = octx->dst.data + i1*nb1 + i2*nb2 + i3*nb3;
 
+                    // Linear index of the start of this row
+                    uint32_t L_start = (i3 * ne2 * ne1 + i2 * ne1 + i1) * ne0;
+
+                    if (src_cont) {
+                        // Fast path: src is contiguous
+                        const uintptr_t src0_ptr = octx->src0.data + L_start * sizeof(float);
+                        hvx_copy_fp32_uu((uint8_t *)dst_row_ptr, (const uint8_t *)src0_ptr, ne0 * sizeof(float));
+                    } else {
+                        // Slow path: unravel linear index for each element
+                        float * d = (float *)dst_row_ptr;
+                        for (uint32_t i0 = 0; i0 < ne0; ++i0) {
+                            uint32_t L = L_start + i0;
+
+                            // Unravel L to (k3, k2, k1, k0)
+                            uint32_t k3 = fastdiv(L, &octx->cpy_rshp_div_n2n1n0);
+                            uint32_t rem2 = L - k3 * octx->cpy_rshp_div_n2n1n0.mp; // approximate fix, wait fastmodulo?
+                            // Actually fastmodulo(L, divisor, &val) computes L % divisor.
+                            // But here divisors are cumulative products.
+                            // fastdiv returns quotient.
+                            // rem2 = L % (ne02*ne01*ne00).
+                            // But fastmodulo needs div struct for the divisor.
+                            // We have struct for ne00, ne00*ne01, ne00*ne01*ne02.
+                            // L / (ne00*ne01*ne02) = k3.
+                            // We don't have struct for that divisor? Yes we added cpy_rshp_div_n2n1n0.
+                            // Wait, L % (ne00*ne01*ne02) is not what we want.
+                            // We want L - k3 * (ne00*ne01*ne02).
+                            // But fastdiv uses precomputed multiplier.
+                            // Let's just use fastmodulo if possible.
+
+                            // Let's trust standard unraveling:
+                            // k3 = L / (N2*N1*N0)
+                            // r2 = L % (N2*N1*N0)
+                            // k2 = r2 / (N1*N0)
+                            // r1 = r2 % (N1*N0)
+                            // k1 = r1 / N0
+                            // k0 = r1 % N0
+
+                            // We need div/mod for cumulative sizes.
+
+                            // Recalculate using integer math if sizes are small? No, use fastdiv.
+                            // But we need the 'stride' values for multiplication.
+                            // struct fastdiv_values doesn't store the divisor 'd'.
+                            // We can store them in context? Or recompute?
+                            // Or just pass them.
+                            // ne00, ne01, ne02 are available.
+
+                            uint32_t N0 = ne00;
+                            uint32_t N1N0 = ne00 * ne01;
+                            uint32_t N2N1N0 = ne00 * ne01 * ne02;
+
+                            // k3
+                            k3 = fastdiv(L, &octx->cpy_rshp_div_n2n1n0);
+                            uint32_t r2 = L - k3 * N2N1N0;
+
+                            // k2
+                            uint32_t k2 = fastdiv(r2, &octx->cpy_rshp_div_n1n0);
+                            uint32_t r1 = r2 - k2 * N1N0;
+
+                            // k1
+                            uint32_t k1 = fastdiv(r1, &octx->cpy_rshp_div_n0);
+                            uint32_t k0 = r1 - k1 * N0;
+
+                            const uintptr_t src_ptr = octx->src0.data + k0*nb00 + k1*nb01 + k2*nb02 + k3*nb03;
+                            d[i0] = *(const float *)src_ptr;
+                        }
+                    }
+                }
+            }
+        }
+        return HTP_STATUS_OK;
+    }
+
+    // Broadcast Mode
     const bool broadcast_1 = (ne01 != ne1);
     const bool broadcast_2 = (ne02 != ne2);
     const bool broadcast_3 = (ne03 != ne3);
@@ -72,9 +147,6 @@ static int cpy_thread_f32_f32(struct htp_ops_context * octx, const int nth, cons
         // Map i3 to src0 coord
         uint32_t i03 = i3;
         if (broadcast_3) {
-            // if ne03 == 1, i03 = 0. else i03 = i3 % ne03.
-            // But ggml broadcasting rules usually imply either equal or 1.
-            // If they are not equal and not 1, it's invalid unless it's repeat, but CPY supports standard broadcasting.
             i03 = (ne03 == 1) ? 0 : fastmodulo(i3, ne03, &octx->cpy_div_ne03);
         }
 
@@ -90,11 +162,6 @@ static int cpy_thread_f32_f32(struct htp_ops_context * octx, const int nth, cons
                     i01 = (ne01 == 1) ? 0 : fastmodulo(i1, ne01, &octx->cpy_div_ne01);
                 }
 
-                // If ne00 == ne0, we copy the whole row.
-                // If ne00 == 1 and ne0 > 1, we broadcast the scalar to the row.
-                // Other cases: technically possible but rare in simple CPY.
-                // Let's support ne00 == ne0 and ne00 == 1.
-
                 const uintptr_t src0_ptr = octx->src0.data + i01*nb01 + i02*nb02 + i03*nb03;
                 const uintptr_t dst_ptr  = octx->dst.data  + i1*nb1   + i2*nb2   + i3*nb3;
 
@@ -103,10 +170,6 @@ static int cpy_thread_f32_f32(struct htp_ops_context * octx, const int nth, cons
                 } else if (ne00 == 1) {
                     hvx_bcast_fp32_u((uint8_t *)dst_ptr, *(const float *)src0_ptr, ne0);
                 } else {
-                    // General case (repeat/tile)? Not implemented for now, fallback or partial copy?
-                    // GGML CPY usually expects broadcasting rules.
-                    // If ne00 != 1 and ne00 != ne0, it might be a partial copy or repeat.
-                    // For now, support only broadcast 1->N or copy N->N.
                     return HTP_STATUS_NO_SUPPORT;
                 }
             }
@@ -135,9 +198,18 @@ int op_cpy(struct htp_ops_context * octx) {
         return HTP_STATUS_OK;
     }
 
-    octx->cpy_div_ne01 = init_fastdiv_values(ne01);
-    octx->cpy_div_ne02 = init_fastdiv_values(ne02);
-    octx->cpy_div_ne03 = init_fastdiv_values(ne03);
+    const bool reshape = (ne00 != ne0 || ne01 != ne1 || ne02 != ne2 || ne03 != ne3);
+    if (reshape) {
+        // Reshape mode needs different fastdivs
+        octx->flags |= 0x80000000;
+        octx->cpy_rshp_div_n0      = init_fastdiv_values(ne00);
+        octx->cpy_rshp_div_n1n0    = init_fastdiv_values(ne01 * ne00);
+        octx->cpy_rshp_div_n2n1n0  = init_fastdiv_values(ne02 * ne01 * ne00);
+    } else {
+        octx->cpy_div_ne01 = init_fastdiv_values(ne01);
+        octx->cpy_div_ne02 = init_fastdiv_values(ne02);
+        octx->cpy_div_ne03 = init_fastdiv_values(ne03);
+    }
 
     const uint32_t n_jobs = MIN(nr, octx->n_threads);
     octx->src0_nrows_per_thread = (nr + n_jobs - 1) / n_jobs;

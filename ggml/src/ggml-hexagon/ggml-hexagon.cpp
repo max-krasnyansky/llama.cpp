@@ -2891,8 +2891,14 @@ static bool ggml_hexagon_supported_cpy(const struct ggml_hexagon_session * sess,
 
     // Check for broadcasting support
     // We only support broadcasting where src0->ne[0] == 1 or src0->ne[0] == dst->ne[0]
-    if ((src0->ne[0] != dst->ne[0]) && (src0->ne[0] != 1)) {
-        return false;
+    // If not broadcasting, it might be a reshape where dimensions differ but nelements match.
+    // The kernel supports this via linear copy mode.
+    // We reject only if nelements differ AND broadcasting rules are violated.
+
+    if (ggml_nelements(src0) != ggml_nelements(dst)) {
+        if ((src0->ne[0] != dst->ne[0]) && (src0->ne[0] != 1)) {
+            return false;
+        }
     }
 
     return true;
