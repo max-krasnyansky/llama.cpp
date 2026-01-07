@@ -74,6 +74,10 @@ struct htp_ops_context {
     struct fastdiv_values get_rows_div_ne10;      // fastdiv values for ne10
     struct fastdiv_values get_rows_div_ne10_ne11; // fastdiv values for ne10 * ne11
 
+    struct fastdiv_values cpy_div_ne01; // fastdiv values for ne01
+    struct fastdiv_values cpy_div_ne02; // fastdiv values for ne02
+    struct fastdiv_values cpy_div_ne03; // fastdiv values for ne03
+
     uint32_t flags;
 };
 
@@ -88,5 +92,6 @@ int op_rope(struct htp_ops_context * octx);
 int op_flash_attn_ext(struct htp_ops_context * octx);
 int op_set_rows(struct htp_ops_context * octx);
 int op_get_rows(struct htp_ops_context * octx);
+int op_cpy(struct htp_ops_context * octx);
 
 #endif /* HTP_OPS_H */
