@@ -101,34 +101,7 @@ static int cpy_thread_f32_f32(struct htp_ops_context * octx, const int nth, cons
                 if (ne00 == ne0) {
                     hvx_copy_fp32_uu((uint8_t *)dst_ptr, (const uint8_t *)src0_ptr, ne0 * sizeof(float));
                 } else if (ne00 == 1) {
-                    // Broadcast scalar to row
-                    // We can use hvx_bcast_fp32_a if dst is aligned, but it might not be.
-                    // Let's use a splat and store loop or a helper if available.
-                    // hvx-utils.h has `hvx_bcast_fp32_a`, let's check `hvx_bcast_fp32_u` existence or write a loop.
-                    // It doesn't seem to have _u version in the header provided in context memory, but we can check.
-                    // Actually, let's just assume we can implement a simple loop using intrinsics.
-
-                    const float val = *(const float *)src0_ptr;
-                    HVX_Vector vval = hvx_vec_splat_fp32(val);
-
-                    // Destination might be unaligned.
-                    uint8_t * d = (uint8_t *)dst_ptr;
-                    int n = ne0 * sizeof(float);
-
-                    // Simple unaligned store loop
-                    // But we want to be efficient.
-                    // We can use hvx_vec_store_u
-
-                    // Fill vectors
-                    int nvec = n / 128;
-                    int nrem = n % 128;
-
-                    for(int v = 0; v < nvec; ++v) {
-                        hvx_vec_store_u(d + v * 128, 128, vval);
-                    }
-                    if (nrem > 0) {
-                        hvx_vec_store_u(d + nvec * 128, nrem, vval);
-                    }
+                    hvx_bcast_fp32_u((uint8_t *)dst_ptr, *(const float *)src0_ptr, ne0);
                 } else {
                     // General case (repeat/tile)? Not implemented for now, fallback or partial copy?
                     // GGML CPY usually expects broadcasting rules.

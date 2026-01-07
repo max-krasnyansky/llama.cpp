@@ -2115,11 +2115,6 @@ static bool ggml_hexagon_supported_get_rows(const struct ggml_hexagon_session * 
         return false;
     }
 
-    // Dimension 0 must be contiguous
-    if (src0->nb[0] != sizeof(float) || dst->nb[0] != sizeof(float)) {
-        return false;
-    }
-
     return true;
 }
 
@@ -2886,6 +2881,17 @@ static bool ggml_hexagon_supported_cpy(const struct ggml_hexagon_session * sess,
     }
 
     if (dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    // Dimension 0 must be contiguous
+    if (src0->nb[0] != sizeof(float) || dst->nb[0] != sizeof(float)) {
+        return false;
+    }
+
+    // Check for broadcasting support
+    // We only support broadcasting where src0->ne[0] == 1 or src0->ne[0] == dst->ne[0]
+    if ((src0->ne[0] != dst->ne[0]) && (src0->ne[0] != 1)) {
         return false;
     }
 

@@ -388,6 +388,27 @@ static inline void hvx_bcast_fp32_a(uint8_t * restrict dst, float elem, uint32_t
     }
 }
 
+// bcast 1 fp32 element from source to n fp32 elements in destination : destination is unaligned
+static inline void hvx_bcast_fp32_u(uint8_t * restrict dst, float elem, uint32_t n) {
+    HVX_UVector * restrict vdst = (HVX_UVector *) dst;
+
+    HVX_Vector velem = hvx_vec_splat_fp32(elem);
+
+    uint32_t nvec = n / 32;
+    uint32_t nloe = n % 32;
+
+    uint32_t i = 0;
+
+    #pragma unroll(4)
+    for (; i < nvec; i++) {
+        vdst[i] = velem;
+    }
+
+    if (nloe) {
+        hvx_vec_store_u((void *) &vdst[i], nloe * sizeof(float), velem);
+    }
+}
+
 
 /* Return whether 'n' elements from vector are in the one chunk of 'chunk_size'. */
 static __attribute__((always_inline)) int32_t is_in_one_chunk(void * addr, uint32_t n, uint32_t chunk_size) {
