@@ -2879,11 +2879,11 @@ static bool ggml_hexagon_supported_cpy(const struct ggml_hexagon_session * sess,
     const struct ggml_tensor * src0 = op->src[0];
     const struct ggml_tensor * dst  = op;
 
-    if (src0->type != GGML_TYPE_F32) {
+    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) {
         return false;
     }
 
-    if (dst->type != GGML_TYPE_F32) {
+    if (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_F16) {
         return false;
     }
 

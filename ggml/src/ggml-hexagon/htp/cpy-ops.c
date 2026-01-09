@@ -64,6 +64,26 @@ struct htp_copy_context {
                                            \
     const uint32_t   nr = ne01;
 
+static void cpy_thread_sametype_sameshape(struct htp_copy_context * ct, struct htp_ops_context * octx, const int nth, const int ith) {
+    cpy_preamble;
+
+    // parallelize by src0 rows
+    const uint32_t dr  = ct->src0_nrows_per_thread;
+    const uint32_t ir0 = dr * ith;
+    const uint32_t ir1 = (ir0 + dr) < nr ? (ir0 + dr) : nr;
+
+    // copy by rows
+    for (uint32_t i03 = 0; i03 < ne03; i03++) {
+        for (uint32_t i02 = 0; i02 < ne02; i02++) {
+            for (uint32_t i01 = ir0; i01 < ir1; i01++) {
+                uint8_t* dst_ptr  = (uint8_t*) dst->data  + i01*nb1  + i02*nb2  + i03*nb3;
+                uint8_t* src0_ptr = (uint8_t*) src0->data + i01*nb01 + i02*nb02 + i03*nb03;
+                hvx_copy_uu(dst_ptr, src0_ptr, ne00, ct->src0_type_size);
+            }
+        }
+    }
+}
+
 static void cpy_thread_sametype_reshape(struct htp_copy_context * ct, struct htp_ops_context * octx, int nth, int ith) {
     cpy_preamble;
 
@@ -129,26 +149,6 @@ static void cpy_thread_sametype_reshape(struct htp_copy_context * ct, struct htp
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-static void cpy_thread_sametype_sameshape(struct htp_copy_context * ct, struct htp_ops_context * octx, const int nth, const int ith) {
-    cpy_preamble;
-
-    // parallelize by src0 rows
-    const uint32_t dr  = ct->src0_nrows_per_thread;
-    const uint32_t ir0 = dr * ith;
-    const uint32_t ir1 = (ir0 + dr) < nr ? (ir0 + dr) : nr;
-
-    // copy by rows
-    for (uint32_t i03 = 0; i03 < ne03; i03++) {
-        for (uint32_t i02 = 0; i02 < ne02; i02++) {
-            for (uint32_t i01 = ir0; i01 < ir1; i01++) {
-                uint8_t* dst_ptr  = (uint8_t*) dst->data  + i01*nb1  + i02*nb2  + i03*nb3;
-                uint8_t* src0_ptr = (uint8_t*) src0->data + i01*nb01 + i02*nb02 + i03*nb03;
-                hvx_copy_uu(dst_ptr, src0_ptr, ne00, ct->src0_type_size);
             }
         }
     }
@@ -274,7 +274,8 @@ int op_cpy(struct htp_ops_context * octx) {
     }
 
     const bool sametype  = (src0->type == dst->type);
-    const bool sameshape = (ne00 == ne0 && ne01 == ne1 && ne02 == ne2 && ne03 == ne3);
+    const bool sameshape = (ne00 == ne0 && ne01 == ne1 && ne02 == ne2 && ne03 == ne3) &&
+                           (nb00 == nb0 && nb01 == nb1 && nb02 == nb2 && nb03 == nb3);
 
     const uint32_t n_jobs = MIN(nr, octx->n_threads);
     ct.src0_nrows_per_thread = (nr + n_jobs - 1) / n_jobs;
