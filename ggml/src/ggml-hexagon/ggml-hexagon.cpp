@@ -2879,13 +2879,19 @@ static bool ggml_hexagon_supported_cpy(const struct ggml_hexagon_session * sess,
     const struct ggml_tensor * src0 = op->src[0];
     const struct ggml_tensor * dst  = op;
 
-    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) {
-        return false;
-    }
+    // for now we can do f32 -> f16 and f16 -> f32 (without reshaping)
+    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) return false;
+    if ( dst->type != GGML_TYPE_F32 &&  dst->type != GGML_TYPE_F16) return false;
 
-    if (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_F16) {
-        return false;
-    }
+    const bool sametype   = (src0->type == dst->type);
+    const bool transposed = ggml_is_transposed(src0) || ggml_is_transposed(dst);
+    const bool sameshape  = !transposed && ggml_are_same_shape(src0, dst);
+
+    // can handle any shape and any same-type (pretty slow if reshaping is required)
+    if (sametype) return true;
+
+    // cannot handle re-shaping and type conversion at the same time
+    if (!sameshape) return false;
 
     return true;
 }

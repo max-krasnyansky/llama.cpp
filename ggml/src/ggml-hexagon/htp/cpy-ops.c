@@ -75,6 +75,7 @@ static void cpy_thread_sametype_sameshape(struct htp_copy_context * ct, struct h
     // copy by rows
     for (uint32_t i03 = 0; i03 < ne03; i03++) {
         for (uint32_t i02 = 0; i02 < ne02; i02++) {
+            #pragma unroll(2)
             for (uint32_t i01 = ir0; i01 < ir1; i01++) {
                 uint8_t* dst_ptr  = (uint8_t*) dst->data  + i01*nb1  + i02*nb2  + i03*nb3;
                 uint8_t* src0_ptr = (uint8_t*) src0->data + i01*nb01 + i02*nb02 + i03*nb03;
@@ -154,7 +155,7 @@ static void cpy_thread_sametype_reshape(struct htp_copy_context * ct, struct htp
     }
 }
 
-static void cpy_thread_retype_sameshape(struct htp_copy_context * ct, struct htp_ops_context * octx, const int nth, const int ith) {
+static void cpy_thread_f16_f32_sameshape(struct htp_copy_context * ct, struct htp_ops_context * octx, const int nth, const int ith) {
     cpy_preamble;
 
     // parallelize by src0 rows
@@ -165,16 +166,17 @@ static void cpy_thread_retype_sameshape(struct htp_copy_context * ct, struct htp
     // copy by rows
     for (uint32_t i03 = 0; i03 < ne03; i03++) {
         for (uint32_t i02 = 0; i02 < ne02; i02++) {
+            #pragma unroll(2)
             for (uint32_t i01 = ir0; i01 < ir1; i01++) {
                 uint8_t* dst_ptr  = (uint8_t*) dst->data  + i01*nb1  + i02*nb2  + i03*nb3;
                 uint8_t* src0_ptr = (uint8_t*) src0->data + i01*nb01 + i02*nb02 + i03*nb03;
-                hvx_copy_uu(dst_ptr, src0_ptr, ne00, ct->src0_type_size); // FIXME
+                hvx_copy_fp16_fp32_uu(dst_ptr, src0_ptr, ne00);
             }
         }
     }
 }
 
-static void cpy_thread_retype_reshape(struct htp_copy_context * ct, struct htp_ops_context * octx, const int nth, const int ith) {
+static void cpy_thread_f32_f16_sameshape(struct htp_copy_context * ct, struct htp_ops_context * octx, const int nth, const int ith) {
     cpy_preamble;
 
     // parallelize by src0 rows
@@ -182,63 +184,14 @@ static void cpy_thread_retype_reshape(struct htp_copy_context * ct, struct htp_o
     const uint32_t ir0 = dr * ith;
     const uint32_t ir1 = (ir0 + dr) < nr ? (ir0 + dr) : nr;
 
-    // dst counters
-    int64_t k10 = 0;
-    int64_t i11 = 0;
-    int64_t i12 = 0;
-    int64_t i13 = 0;
-
-    // number of blocks in a row
-    const int64_t nk00 = ct->src0_blocks_per_row; 
-    const int64_t nk0  = ct->dst_blocks_per_row;
-
-    for (int64_t i03 = 0; i03 < ne03; i03++) {
-        for (int64_t i02 = 0; i02 < ne02; i02++) {
-            k10 += nk00 * ir0;
-            while (k10 >= nk0) {
-                k10 -= nk0;
-                if (++i11 == ne1) {
-                    i11 = 0;
-                    if (++i12 == ne2) {
-                        i12 = 0;
-                        if (++i13 == ne3) {
-                            i13 = 0;
-                        }
-                    }
-                }
-            }
-            for (int64_t i01 = ir0; i01 < ir1; i01++) {
-                for (int64_t k00 = 0; k00 < nk00; k00++) {
-                    const char * src0_ptr = ((char *) src0->data + k00*nb00 + i01*nb01 + i02*nb02 + i03*nb03);
-                          char * dst_ptr  = ((char *)  dst->data + k10*nb0  + i11*nb1  + i12*nb2  + i13*nb3);
-                    memcpy(dst_ptr, src0_ptr, ct->dst_type_size); // FIXME
-
-                    if (++k10 == nk0) {
-                        k10 = 0;
-                        if (++i11 == ne1) {
-                            i11 = 0;
-                            if (++i12 == ne2) {
-                                i12 = 0;
-                                if (++i13 == ne3) {
-                                    i13 = 0;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            k10 += nk00 * (ne01 - ir1);
-            while (k10 >= nk0) {
-                k10 -= nk0;
-                if (++i11 == ne1) {
-                    i11 = 0;
-                    if (++i12 == ne2) {
-                        i12 = 0;
-                        if (++i13 == ne3) {
-                            i13 = 0;
-                        }
-                    }
-                }
+    // copy by rows
+    for (uint32_t i03 = 0; i03 < ne03; i03++) {
+        for (uint32_t i02 = 0; i02 < ne02; i02++) {
+            #pragma unroll(2)
+            for (uint32_t i01 = ir0; i01 < ir1; i01++) {
+                uint8_t* dst_ptr  = (uint8_t*) dst->data  + i01*nb1  + i02*nb2  + i03*nb3;
+                uint8_t* src0_ptr = (uint8_t*) src0->data + i01*nb01 + i02*nb02 + i03*nb03;
+                // hvx_copy_fp32_fp16_uu(dst_ptr, src0_ptr, ne00); FIXME: this is missing
             }
         }
     }
@@ -273,21 +226,26 @@ int op_cpy(struct htp_ops_context * octx) {
         return HTP_STATUS_OK;
     }
 
-    const bool sametype  = (src0->type == dst->type);
-    const bool sameshape = (ne00 == ne0 && ne01 == ne1 && ne02 == ne2 && ne03 == ne3) &&
-                           (nb00 == nb0 && nb01 == nb1 && nb02 == nb2 && nb03 == nb3);
+    const bool sametype   = (src0->type == dst->type);
+    const bool transposed = (nb00 > nb01) || (nb0 > nb1);
+    const bool sameshape  = !transposed && (ne00 == ne0 && ne01 == ne1 && ne02 == ne2 && ne03 == ne3);
 
     const uint32_t n_jobs = MIN(nr, octx->n_threads);
     ct.src0_nrows_per_thread = (nr + n_jobs - 1) / n_jobs;
 
     if (sametype && sameshape) {
         ct.copy = cpy_thread_sametype_sameshape;
+    } else if (sameshape) {
+        /**/ if (dst->type == HTP_TYPE_F16 && src0->type == HTP_TYPE_F32)
+            ct.copy = cpy_thread_f16_f32_sameshape;
+        else if (dst->type == HTP_TYPE_F32 && src0->type == HTP_TYPE_F16)
+            ct.copy = cpy_thread_f32_f16_sameshape;
+        else
+            return HTP_STATUS_NO_SUPPORT;
     } else if (sametype) {
         ct.copy = cpy_thread_sametype_reshape;
-    } else if (sameshape) {
-        ct.copy = cpy_thread_retype_sameshape;
     } else {
-        ct.copy = cpy_thread_retype_reshape;
+        return HTP_STATUS_NO_SUPPORT;
     }
 
     worker_pool_run_func(octx->ctx->worker_pool, cpy_work_func, &ct, n_jobs);
