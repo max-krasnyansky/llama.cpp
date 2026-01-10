@@ -66,7 +66,7 @@ static inline uint32_t fastmodulo(uint32_t n, uint32_t d, const struct fastdiv_v
 
 static inline void htp_l2fetch(const void * p, uint32_t height, uint32_t width, uint32_t stride) {
     const uint64_t control = Q6_P_combine_RR(stride, Q6_R_combine_RlRl(width, height));
-    asm volatile(" l2fetch(%0,%1) " : : "r"(p), "r"(control));
+    Q6_l2fetch_AP((void *) p, control);
 }
 
 static inline int32_t htp_is_one_chunk(void * addr, uint32_t n, uint32_t chunk_size) {
