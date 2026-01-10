@@ -191,7 +191,7 @@ static void cpy_thread_f32_f16_sameshape(struct htp_copy_context * ct, struct ht
             for (uint32_t i01 = ir0; i01 < ir1; i01++) {
                 uint8_t* dst_ptr  = (uint8_t*) dst->data  + i01*nb1  + i02*nb2  + i03*nb3;
                 uint8_t* src0_ptr = (uint8_t*) src0->data + i01*nb01 + i02*nb02 + i03*nb03;
-                // hvx_copy_fp32_fp16_uu(dst_ptr, src0_ptr, ne00); FIXME: this is missing
+                hvx_copy_fp32_fp16_uu(dst_ptr, src0_ptr, ne00);
             }
         }
     }
