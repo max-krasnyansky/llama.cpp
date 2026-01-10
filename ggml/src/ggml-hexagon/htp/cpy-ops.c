@@ -100,7 +100,7 @@ static void cpy_thread_sametype_reshape(struct htp_copy_context * ct, struct htp
     int64_t i13 = 0;
 
     // number of blocks in a row
-    const int64_t nk00 = ct->src0_blocks_per_row; 
+    const int64_t nk00 = ct->src0_blocks_per_row;
     const int64_t nk0  = ct->dst_blocks_per_row;
 
     for (int64_t i03 = 0; i03 < ne03; i03++) {

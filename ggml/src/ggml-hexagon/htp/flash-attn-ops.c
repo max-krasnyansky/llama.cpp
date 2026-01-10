@@ -148,7 +148,7 @@ static inline void hvx_mad_f32_f16_aa(float * restrict y, const void * restrict 
 
         if (nloe) {
             HVX_Vector xy = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(xs, ptr_y[i]));
-            hvx_vec_store_u(&ptr_y[i], nloe * 4, xy);
+            hvx_vec_store_a(&ptr_y[i], nloe * 4, xy);
         }
     }
 }

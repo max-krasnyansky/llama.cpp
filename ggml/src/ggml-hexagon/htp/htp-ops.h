@@ -81,7 +81,7 @@ struct htp_ops_context {
     struct fastdiv_values cpy_rshp_div_n0;       // fastdiv values for ne00
     struct fastdiv_values cpy_rshp_div_n1n0;     // fastdiv values for ne00*ne01
     struct fastdiv_values cpy_rshp_div_n2n1n0;   // fastdiv values for ne00*ne01*ne02
-    
+
     uint32_t flags;
 };
 

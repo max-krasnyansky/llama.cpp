@@ -882,7 +882,7 @@ static inline void hvx_scale_f32_aa(uint8_t * restrict dst, const uint8_t * rest
 
     if (nloe) {
         HVX_Vector v = Q6_Vqf32_vmpy_VsfVsf(vsrc[i], vs);
-        hvx_vec_store_u((void *) &vdst[i], nloe * 4, Q6_Vsf_equals_Vqf32(v));
+        hvx_vec_store_a((void *) &vdst[i], nloe * 4, Q6_Vsf_equals_Vqf32(v));
     }
 }
 
@@ -937,7 +937,7 @@ static inline void hvx_scale_offset_f32_aa(uint8_t * restrict dst, const uint8_t
 
     if (nloe) {
         HVX_Vector v = Q6_Vqf32_vadd_Vqf32Vsf(Q6_Vqf32_vmpy_VsfVsf(vsrc[i], vs), vo);
-        hvx_vec_store_u((void *) &vdst[i], nloe * 4, Q6_Vsf_equals_Vqf32(v));
+        hvx_vec_store_a((void *) &vdst[i], nloe * 4, Q6_Vsf_equals_Vqf32(v));
     }
 }
 
