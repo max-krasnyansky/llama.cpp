@@ -2,7 +2,6 @@
 #define HVX_COPY_H
 
 #include <hexagon_types.h>
-#include <hexagon_protos.h>
 
 #include <assert.h>
 #include <stddef.h>

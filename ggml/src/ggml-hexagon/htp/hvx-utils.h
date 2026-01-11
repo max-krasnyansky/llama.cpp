@@ -54,10 +54,10 @@ static void hvx_vec_dump_fp16_n(char * pref, HVX_Vector v, uint32_t n) {
     const uint32_t n1 = n % 16;
     int            i  = 0;
     for (; i < n0; i++) {
-        htp_dump_fp16_line(pref, u.fp16 + (16 * i), 16);
+        hex_dump_fp16_line(pref, u.fp16 + (16 * i), 16);
     }
     if (n1) {
-        htp_dump_fp16_line(pref, u.fp16 + (16 * i), n1);
+        hex_dump_fp16_line(pref, u.fp16 + (16 * i), n1);
     }
 }
 
@@ -75,10 +75,10 @@ static void hvx_vec_dump_fp32_n(char * pref, HVX_Vector v, uint32_t n) {
     const uint32_t n1 = n % 16;
     int            i  = 0;
     for (; i < n0; i++) {
-        htp_dump_fp32_line(pref, u.d + (16 * i), 16);
+        hex_dump_fp32_line(pref, u.d + (16 * i), 16);
     }
     if (n1) {
-        htp_dump_fp32_line(pref, u.d + (16 * i), n1);
+        hex_dump_fp32_line(pref, u.d + (16 * i), n1);
     }
 }
 
@@ -103,7 +103,7 @@ static void hvx_vec_dump_int32(char * pref, HVX_Vector v) {
     } u = { .v = v };
 
     for (int i = 0; i < 32 / 16; i++) {
-        htp_dump_int32_line(pref, u.d + (16 * i), 16);
+        hex_dump_int32_line(pref, u.d + (16 * i), 16);
     }
 }
 
@@ -134,7 +134,7 @@ static void hvx_vec_dump_int8(char * pref, HVX_Vector v) {
     } u = { .v = v };
 
     for (int i = 0; i < 128 / 16; i++) {
-        htp_dump_int8_line(pref, u.d + (16 * i), 16);
+        hex_dump_int8_line(pref, u.d + (16 * i), 16);
     }
 }
 
@@ -145,7 +145,7 @@ static void hvx_vec_dump_uint8(char * pref, HVX_Vector v) {
     } u = { .v = v };
 
     for (int i = 0; i < 128 / 16; i++) {
-        htp_dump_uint8_line(pref, u.d + (16 * i), 16);
+        hex_dump_uint8_line(pref, u.d + (16 * i), 16);
     }
 }
 
@@ -828,7 +828,7 @@ static inline void hvx_sigmoid_f32(const uint8_t * restrict src, uint8_t * restr
     }
 
     if (step_of_1 > 0) {
-        slinec = htp_is_aligned(input_v_ptr, 128) && leftover == 0 ? slinep : *input_v_ptr++;
+        slinec = hex_is_aligned(input_v_ptr, 128) && leftover == 0 ? slinep : *input_v_ptr++;
         sline  = Q6_V_valign_VVR(slinec, slinep, (size_t) input);
         *((HVX_UVector *) (output_v_ptr++)) = hvx_vec_fast_sigmoid_fp32_guard(sline, one, max_exp, min_exp);
         slinep = slinec;

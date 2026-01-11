@@ -2,9 +2,6 @@
 #pragma clang diagnostic ignored "-Wunused-function"
 #pragma clang diagnostic ignored "-Wunused-but-set-variable"
 
-#ifdef HTP_DEBUG
-#    define FARF_HIGH 1
-#endif
 #include <HAP_farf.h>
 #include <HAP_perf.h>
 
@@ -366,8 +363,8 @@ static void rope_job_f32_per_thread(struct rope_th_ctx * rope_ctx, int nth, int 
 
     int is_aligned = 1;
     int opt_path   = 0;
-    if ((0 == htp_is_aligned((void *) src0->data, VLEN)) || (0 == htp_is_aligned((void *) src1->data, VLEN)) ||
-        (0 == htp_is_aligned((void *) dst->data, VLEN))) {
+    if ((0 == hex_is_aligned((void *) src0->data, VLEN)) || (0 == hex_is_aligned((void *) src1->data, VLEN)) ||
+        (0 == hex_is_aligned((void *) dst->data, VLEN))) {
         FARF(HIGH, "rope-f32: unaligned addresses in rope op, possibly slower execution\n");
         is_aligned = 0;
     }
@@ -423,9 +420,9 @@ static int execute_op_rope_f32(struct htp_ops_context * octx) {
 
     // VTCM scratchpads for all tensors
     // N rows per thread, padded to HVX vector size
-    octx->dst_spad.size  = htp_round_up(dst_row_size, 128) * n_threads;
-    octx->src0_spad.size = htp_round_up(src0_row_size, 128) * n_threads;
-    octx->src1_spad.size = htp_round_up(src1_row_size, 128) * n_threads;
+    octx->dst_spad.size  = hex_round_up(dst_row_size, 128) * n_threads;
+    octx->src0_spad.size = hex_round_up(src0_row_size, 128) * n_threads;
+    octx->src1_spad.size = hex_round_up(src1_row_size, 128) * n_threads;
 
     size_t spad_size = octx->src0_spad.size + octx->src1_spad.size + octx->dst_spad.size;
 

@@ -2,9 +2,6 @@
 #pragma clang diagnostic ignored "-Wunused-function"
 #pragma clang diagnostic ignored "-Wunused-but-set-variable"
 
-#ifdef HTP_DEBUG
-#    define FARF_HIGH 1
-#endif
 #include <HAP_farf.h>
 #include <HAP_perf.h>
 
@@ -27,7 +24,7 @@ void hvx_exp_f32(const uint8_t * restrict src, uint8_t * restrict dst, const int
 
     int unaligned_addr = 0;
     int unaligned_loop = 0;
-    if ((0 == htp_is_aligned((void *) src, VLEN)) || (0 == htp_is_aligned((void *) dst, VLEN))) {
+    if ((0 == hex_is_aligned((void *) src, VLEN)) || (0 == hex_is_aligned((void *) dst, VLEN))) {
         unaligned_addr = 1;
     }
     // assert((0 == unaligned_addr) || (0 == num_elems_whole));

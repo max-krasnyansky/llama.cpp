@@ -2,9 +2,6 @@
 #pragma clang diagnostic ignored "-Wunused-function"
 #pragma clang diagnostic ignored "-Wunused-but-set-variable"
 
-#ifdef HTP_DEBUG
-#    define FARF_HIGH 1
-#endif
 #include <HAP_farf.h>
 #include <HAP_perf.h>
 
@@ -120,9 +117,9 @@ static void glu_swiglu_fp32_per_thread(const struct htp_tensor * src0,
         data_src1 += swapped ? 0 : nc_in_bytes;
     }
 
-    const size_t src0_row_size_aligned = htp_round_up(src0_row_size, VLEN);
-    const size_t src1_row_size_aligned = htp_round_up(src1_row_size, VLEN);
-    const size_t dst_row_size_aligned  = htp_round_up(dst_row_size, VLEN);
+    const size_t src0_row_size_aligned = hex_round_up(src0_row_size, VLEN);
+    const size_t src1_row_size_aligned = hex_round_up(src1_row_size, VLEN);
+    const size_t dst_row_size_aligned  = hex_round_up(dst_row_size, VLEN);
 
     uint8_t * restrict src0_spad_data = src0_spad->data + (ith * src0_spad->size_per_thread);
     uint8_t * restrict src1_spad_data = src1_spad->data + (ith * src1_spad->size_per_thread);
@@ -245,9 +242,9 @@ static void glu_swiglu_oai_fp32_per_thread(const struct htp_tensor * src0,
         data_src1 += swapped ? 0 : nc_in_bytes;
     }
 
-    const size_t src0_row_size_aligned = htp_round_up(src0_row_size, VLEN);
-    const size_t src1_row_size_aligned = htp_round_up(src1_row_size, VLEN);
-    const size_t dst_row_size_aligned  = htp_round_up(dst_row_size, VLEN);
+    const size_t src0_row_size_aligned = hex_round_up(src0_row_size, VLEN);
+    const size_t src1_row_size_aligned = hex_round_up(src1_row_size, VLEN);
+    const size_t dst_row_size_aligned  = hex_round_up(dst_row_size, VLEN);
 
     uint8_t * restrict src0_spad_data = src0_spad->data + (ith * src0_spad->size_per_thread);
     uint8_t * restrict src1_spad_data = src1_spad->data + (ith * src1_spad->size_per_thread);
@@ -354,8 +351,8 @@ static void unary_gelu_fp32_per_thread(const struct htp_tensor * src0,
 
     const size_t src0_row_size = nb01;
     const size_t dst_row_size  = nb1;
-    const size_t src0_row_size_aligned = htp_round_up(src0_row_size, VLEN);
-    const size_t dst_row_size_aligned  = htp_round_up(dst_row_size, VLEN);
+    const size_t src0_row_size_aligned = hex_round_up(src0_row_size, VLEN);
+    const size_t dst_row_size_aligned  = hex_round_up(dst_row_size, VLEN);
 
     const uint32_t src0_nrows = ne01 * ne02 * ne03;
 
@@ -462,8 +459,8 @@ static void unary_silu_fp32_per_thread(const struct htp_tensor * src0,
 
     const size_t src0_row_size = nb01;
     const size_t dst_row_size  = nb1;
-    const size_t src0_row_size_aligned = htp_round_up(src0_row_size, VLEN);
-    const size_t dst_row_size_aligned  = htp_round_up(dst_row_size, VLEN);
+    const size_t src0_row_size_aligned = hex_round_up(src0_row_size, VLEN);
+    const size_t dst_row_size_aligned  = hex_round_up(dst_row_size, VLEN);
 
     const uint32_t src0_nrows = ne01 * ne02 * ne03;
 
@@ -613,9 +610,9 @@ static int execute_op_activations_fp32(struct htp_ops_context * octx) {
         src1_row_size = src0_row_size;
     }
 
-    const size_t src0_row_size_aligned = htp_round_up(src0_row_size, VLEN);
-    const size_t src1_row_size_aligned = htp_round_up(src1_row_size, VLEN);
-    const size_t dst_row_size_aligned  = htp_round_up(dst_row_size, VLEN);
+    const size_t src0_row_size_aligned = hex_round_up(src0_row_size, VLEN);
+    const size_t src1_row_size_aligned = hex_round_up(src1_row_size, VLEN);
+    const size_t dst_row_size_aligned  = hex_round_up(dst_row_size, VLEN);
     // VTCM scratchpads for all tensors
     // N rows per thread, padded to HVX vector size
 

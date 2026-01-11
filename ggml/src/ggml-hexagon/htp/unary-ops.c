@@ -2,9 +2,6 @@
 #pragma clang diagnostic ignored "-Wunused-function"
 #pragma clang diagnostic ignored "-Wunused-but-set-variable"
 
-#ifdef HTP_DEBUG
-#    define FARF_HIGH 1
-#endif
 #include <HAP_farf.h>
 #include <HAP_perf.h>
 
@@ -119,7 +116,7 @@ static void rms_norm_htp_f32(const float * restrict src,
         float * restrict dst_local       = dst + (ir * row_elems);
 
         if (ir + 1 < num_rows) {
-            htp_l2fetch(src_local + row_elems, row_size, row_size, 1);
+            hex_l2fetch(src_local + row_elems, row_size, row_size, 1);
         }
 
         if (1 == opt_path) {
@@ -163,7 +160,7 @@ static void unary_job_f32_per_thread(const struct htp_tensor * src,
 
     int is_aligned = 1;
     int opt_path   = 0;
-    if ((0 == htp_is_aligned((void *) src->data, VLEN)) || (0 == htp_is_aligned((void *) dst->data, VLEN))) {
+    if ((0 == hex_is_aligned((void *) src->data, VLEN)) || (0 == hex_is_aligned((void *) dst->data, VLEN))) {
         is_aligned = 0;
         FARF(HIGH, "unary-f32: unaligned addresses in unary op, possibly slower execution\n");
     }
@@ -235,8 +232,8 @@ static int execute_op_unary_f32(struct htp_ops_context * octx) {
     const size_t dst_row_size  = dst->nb[1];
 
     // VTCM scratchpads for all tensors
-    octx->dst_spad.size  = htp_round_up(dst_row_size, 128) * n_threads;
-    octx->src0_spad.size = htp_round_up(src0_row_size, 128) * n_threads;
+    octx->dst_spad.size  = hex_round_up(dst_row_size, 128) * n_threads;
+    octx->src0_spad.size = hex_round_up(src0_row_size, 128) * n_threads;
 
     size_t spad_size = octx->src0_spad.size + octx->dst_spad.size;
 

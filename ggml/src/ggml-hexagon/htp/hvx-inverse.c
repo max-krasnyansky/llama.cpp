@@ -2,9 +2,6 @@
 #pragma clang diagnostic ignored "-Wunused-function"
 #pragma clang diagnostic ignored "-Wunused-but-set-variable"
 
-#ifdef HTP_DEBUG
-#    define FARF_HIGH 1
-#endif
 #include <HAP_farf.h>
 #include <HAP_perf.h>
 
@@ -28,7 +25,7 @@ void hvx_inverse_f32(const uint8_t * restrict src, uint8_t * restrict dst, const
 
     int unaligned_addr = 0;
     int unaligned_loop = 0;
-    if ((0 == htp_is_aligned((void *) src, VLEN)) || (0 == htp_is_aligned((void *) dst, VLEN))) {
+    if ((0 == hex_is_aligned((void *) src, VLEN)) || (0 == hex_is_aligned((void *) dst, VLEN))) {
         FARF(HIGH, "hvx_inverse_f32: unaligned address in hvx op, possibly slower execution\n");
         unaligned_addr = 1;
     }

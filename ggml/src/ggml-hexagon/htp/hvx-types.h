@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <hvx_hexagon_protos.h>
+#include <hexagon_types.h>
 
 #define SIZEOF_FP32 (4)
 #define SIZEOF_FP16 (2)

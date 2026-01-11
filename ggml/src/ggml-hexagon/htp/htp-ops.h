@@ -8,6 +8,8 @@
 #include <assert.h>
 #include <stdint.h>
 
+#include <hex-fastdiv.h>
+
 // ggml-common.h must be included prior to this header
 
 struct htp_spad {

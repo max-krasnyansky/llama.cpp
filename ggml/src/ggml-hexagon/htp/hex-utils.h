@@ -1,6 +1,11 @@
 #ifndef HEX_UTILS_H
 #define HEX_UTILS_H
 
+#include "hexagon_types.h"
+
+#include "hex-fastdiv.h"
+#include "hex-dump.h"
+
 #ifndef MAX
 #    define MAX(a, b) ((a) > (b) ? (a) : (b))
 #endif
@@ -35,113 +40,9 @@ static inline uint32_t hex_round_up(uint32_t n, uint32_t m) {
     return m * ((n + m - 1) / m);
 }
 
-// See https://gmplib.org/~tege/divcnst-pldi94.pdf figure 4.1.
-// Precompute mp (m' in the paper) and L such that division
-// can be computed using a multiply (high 32b of 64b result)
-// and a shift:
-//
-// n/d = (mulhi(n, mp) + n) >> L;
-struct hex_fastdiv_values {
-    uint32_t mp;
-    uint32_t l;
-};
-
-static inline struct hex_fastdiv_values hex_init_fastdiv_values(uint32_t d) {
-    struct fastdiv_values result = { 0, 0 };
-    // compute L = ceil(log2(d));
-    while (result.l < 32 && ((uint32_t) 1 << result.l) < d) {
-        ++(result.l);
-    }
-
-    result.mp = (uint32_t) (((uint64_t) 1 << 32) * (((uint64_t) 1 << result.l) - d) / d + 1);
-    return result;
-}
-
-static inline uint32_t hex_fastdiv(uint32_t n, const struct fastdiv_values * vals) {
-    // Compute high 32 bits of n * mp
-    const uint32_t hi = (uint32_t) (((uint64_t) n * vals->mp) >> 32);  // mulhi(n, mp)
-    // add n, apply bit shift
-    return (hi + n) >> vals->l;
-}
-
-static inline uint32_t hex_fastmodulo(uint32_t n, uint32_t d, const struct fastdiv_values * vals) {
-    return n - fastdiv(n, vals) * d;
-}
-
 static inline void hex_l2fetch(const void * p, uint32_t width, uint32_t stride, uint32_t height) {
     const uint64_t control = Q6_P_combine_RR(stride, Q6_R_combine_RlRl(width, height));
     Q6_l2fetch_AP((void *) p, control);
-}
-
-static inline void hex_dump_int8_line(char * pref, const int8_t * x, int n) {
-    char str[1024], *p = str, *p_end = str + sizeof(str);
-    p += snprintf(p, p_end - p, "%s: ", pref);
-    for (int i = 0; i < n && p < p_end; i++) {
-        p += snprintf(p, p_end - p, "%d, ", x[i]);
-    }
-    FARF(HIGH, "%s\n", str);
-}
-
-static inline void hex_dump_uint8_line(char * pref, const uint8_t * x, uint32_t n) {
-    char str[1024], *p = str, *p_end = str + sizeof(str);
-    p += snprintf(p, p_end - p, "%s: ", pref);
-    for (int i = 0; i < n && p < p_end; i++) {
-        p += snprintf(p, p_end - p, "%d, ", x[i]);
-    }
-    FARF(HIGH, "%s\n", str);
-}
-
-static inline void hex_dump_int32_line(char * pref, const int32_t * x, uint32_t n) {
-    char str[1024], *p = str, *p_end = str + sizeof(str);
-    p += snprintf(p, p_end - p, "%s: ", pref);
-    for (int i = 0; i < n; i++) {
-        p += snprintf(p, p_end - p, "%d, ", (int) x[i]);
-    }
-    FARF(HIGH, "%s\n", str);
-}
-
-static inline void hex_dump_fp16_line(char * pref, const __fp16 * x, uint32_t n) {
-    char str[1024], *p = str, *p_end = str + sizeof(str);
-    p += snprintf(p, p_end - p, "%s: ", pref);
-    for (int i = 0; i < n; i++) {
-        p += snprintf(p, p_end - p, "%.6f, ", (float) x[i]);
-    }
-    FARF(HIGH, "%s\n", str);
-}
-
-static inline void hex_dump_fp32_line(char * pref, const float * x, uint32_t n) {
-    char str[1024], *p = str, *p_end = str + sizeof(str);
-    p += snprintf(p, p_end - p, "%s: ", pref);
-    for (int i = 0; i < n; i++) {
-        p += snprintf(p, p_end - p, "%.6f, ", x[i]);
-    }
-    FARF(HIGH, "%s\n", str);
-}
-
-static inline void hex_dump_f32(char * pref, const float * x, uint32_t n) {
-    uint32_t n0 = n / 16;
-    uint32_t n1 = n % 16;
-
-    uint32_t i = 0;
-    for (; i < n0; i++) {
-        htp_dump_fp32_line(pref, x + (16 * i), 16);
-    }
-    if (n1) {
-        htp_dump_fp32_line(pref, x + (16 * i), n1);
-    }
-}
-
-static inline void hex_dump_f16(char * pref, const __fp16 * x, uint32_t n) {
-    uint32_t n0 = n / 16;
-    uint32_t n1 = n % 16;
-
-    uint32_t i = 0;
-    for (; i < n0; i++) {
-        htp_dump_fp16_line(pref, x + (16 * i), 16);
-    }
-    if (n1) {
-        htp_dump_fp16_line(pref, x + (16 * i), n1);
-    }
 }
 
 #endif /* HEX_UTILS_H */

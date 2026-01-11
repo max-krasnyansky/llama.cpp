@@ -1,9 +1,6 @@
 #pragma clang diagnostic ignored "-Wgnu-zero-variadic-macro-arguments"
 #pragma clang diagnostic ignored "-Wunused-function"
 
-#ifdef HTP_DEBUG
-#    define FARF_HIGH 1
-#endif
 #include <HAP_farf.h>
 #include <HAP_perf.h>
 #include <AEEStdErr.h>
@@ -19,6 +16,7 @@
 #include <string.h>
 
 #include "hex-dma.h"
+#include "hex-utils.h"
 
 #define GGML_COMMON_DECL_C
 #include "ggml-common.h"
@@ -361,14 +359,14 @@ struct profile_data {
 
 static inline void profile_start(struct profile_data * d) {
     d->usecs  = HAP_perf_get_qtimer_count();
-    d->cycles = htp_get_cycles();
-    d->pkts   = htp_get_pktcnt();
+    d->cycles = hex_get_cycles();
+    d->pkts   = hex_get_pktcnt();
 }
 
 static inline void profile_stop(struct profile_data * d) {
     d->usecs  = HAP_perf_qtimer_count_to_us(HAP_perf_get_qtimer_count() - d->usecs);
-    d->cycles = htp_get_cycles() - d->cycles;
-    d->pkts   = htp_get_pktcnt() - d->pkts;
+    d->cycles = hex_get_cycles() - d->cycles;
+    d->pkts   = hex_get_pktcnt() - d->pkts;
 }
 
 static int send_htp_rsp(struct htp_context *     c,
