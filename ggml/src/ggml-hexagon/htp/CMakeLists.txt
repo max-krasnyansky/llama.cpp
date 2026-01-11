@@ -18,7 +18,6 @@ add_library(${HTP_LIB} SHARED
     htp_iface_skel.c
     worker-pool.c
     hex-dma.c
-    hvx-sigmoid.c
     hvx-inverse.c
     hvx-exp.c
     hvx-utils.c
