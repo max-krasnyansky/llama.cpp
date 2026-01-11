@@ -20,7 +20,6 @@ add_library(${HTP_LIB} SHARED
     hex-dma.c
     hvx-sigmoid.c
     hvx-inverse.c
-    hvx-exp.c
     hvx-utils.c
     matmul-ops.c
     binary-ops.c

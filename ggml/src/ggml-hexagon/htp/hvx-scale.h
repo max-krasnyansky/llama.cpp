@@ -1,13 +1,11 @@
 #ifndef HVX_SCALE_H
 #define HVX_SCALE_H
 
-#include <hexagon_types.h>
-
 #include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#include "hvx-copy.h"
+#include "hvx-base.h"
 
 #define hvx_scale_f32_loop_body(dst_type, src_type, vec_store)                       \
     do {                                                                             \
