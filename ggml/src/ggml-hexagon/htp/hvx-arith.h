@@ -1,0 +1,309 @@
+#ifndef HVX_ARITH_H
+#define HVX_ARITH_H
+
+#include <assert.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <math.h>
+
+#include "hvx-base.h"
+#include "hex-utils.h"
+
+//
+// Binary operations (add, mul, sub)
+//
+
+#define hvx_arith_loop_body(dst_type, src0_type, src1_type, vec_store, vec_op) \
+    do {                                                                       \
+        dst_type * restrict vdst  = (dst_type *) dst;                          \
+        src0_type * restrict vsrc0 = (src0_type *) src0;                       \
+        src1_type * restrict vsrc1 = (src1_type *) src1;                       \
+                                                                               \
+        const uint32_t elem_size = sizeof(float);                              \
+        const uint32_t epv  = 128 / elem_size;                                 \
+        const uint32_t nvec = n / epv;                                         \
+        const uint32_t nloe = n % epv;                                         \
+                                                                               \
+        uint32_t i = 0;                                                        \
+                                                                               \
+        _Pragma("unroll(4)")                                                   \
+        for (; i < nvec; i++) {                                                \
+            vdst[i] = vec_op(vsrc0[i], vsrc1[i]);                              \
+        }                                                                      \
+        if (nloe) {                                                            \
+            HVX_Vector v = vec_op(vsrc0[i], vsrc1[i]);                         \
+            vec_store((void *) &vdst[i], nloe * elem_size, v);                 \
+        }                                                                      \
+    } while(0)
+
+#define HVX_OP_ADD(a, b) Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_VsfVsf(a, b))
+#define HVX_OP_SUB(a, b) Q6_Vsf_equals_Vqf32(Q6_Vqf32_vsub_VsfVsf(a, b))
+#define HVX_OP_MUL(a, b) Q6_Vsf_equals_Vqf32(Q6_Vqf32_vmpy_VsfVsf(a, b))
+
+// ADD variants
+
+static inline void hvx_add_f32_aa(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, uint32_t n) {
+    assert((unsigned long) dst % 128 == 0);
+    assert((unsigned long) src0 % 128 == 0);
+    assert((unsigned long) src1 % 128 == 0);
+    hvx_arith_loop_body(HVX_Vector, HVX_Vector, HVX_Vector, hvx_vec_store_a, HVX_OP_ADD);
+}
+
+static inline void hvx_add_f32_au(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, uint32_t n) {
+    assert((unsigned long) dst % 128 == 0);
+    assert((unsigned long) src0 % 128 == 0);
+    hvx_arith_loop_body(HVX_Vector, HVX_Vector, HVX_UVector, hvx_vec_store_a, HVX_OP_ADD);
+}
+
+static inline void hvx_add_f32_ua(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, uint32_t n) {
+    assert((unsigned long) src0 % 128 == 0);
+    assert((unsigned long) src1 % 128 == 0);
+    hvx_arith_loop_body(HVX_UVector, HVX_Vector, HVX_Vector, hvx_vec_store_u, HVX_OP_ADD);
+}
+
+static inline void hvx_add_f32_uu(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, uint32_t n) {
+    hvx_arith_loop_body(HVX_UVector, HVX_UVector, HVX_UVector, hvx_vec_store_u, HVX_OP_ADD);
+}
+
+// SUB variants
+
+static inline void hvx_sub_f32_aa(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, uint32_t n) {
+    assert((unsigned long) dst % 128 == 0);
+    assert((unsigned long) src0 % 128 == 0);
+    assert((unsigned long) src1 % 128 == 0);
+    hvx_arith_loop_body(HVX_Vector, HVX_Vector, HVX_Vector, hvx_vec_store_a, HVX_OP_SUB);
+}
+
+static inline void hvx_sub_f32_au(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, uint32_t n) {
+    assert((unsigned long) dst % 128 == 0);
+    assert((unsigned long) src0 % 128 == 0);
+    hvx_arith_loop_body(HVX_Vector, HVX_Vector, HVX_UVector, hvx_vec_store_a, HVX_OP_SUB);
+}
+
+static inline void hvx_sub_f32_ua(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, uint32_t n) {
+    assert((unsigned long) src0 % 128 == 0);
+    assert((unsigned long) src1 % 128 == 0);
+    hvx_arith_loop_body(HVX_UVector, HVX_Vector, HVX_Vector, hvx_vec_store_u, HVX_OP_SUB);
+}
+
+static inline void hvx_sub_f32_uu(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, uint32_t n) {
+    hvx_arith_loop_body(HVX_UVector, HVX_UVector, HVX_UVector, hvx_vec_store_u, HVX_OP_SUB);
+}
+
+// MUL variants
+
+static inline void hvx_mul_f32_aa(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, uint32_t n) {
+    assert((unsigned long) dst % 128 == 0);
+    assert((unsigned long) src0 % 128 == 0);
+    assert((unsigned long) src1 % 128 == 0);
+    hvx_arith_loop_body(HVX_Vector, HVX_Vector, HVX_Vector, hvx_vec_store_a, HVX_OP_MUL);
+}
+
+static inline void hvx_mul_f32_au(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, uint32_t n) {
+    assert((unsigned long) dst % 128 == 0);
+    assert((unsigned long) src0 % 128 == 0);
+    hvx_arith_loop_body(HVX_Vector, HVX_Vector, HVX_UVector, hvx_vec_store_a, HVX_OP_MUL);
+}
+
+static inline void hvx_mul_f32_ua(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, uint32_t n) {
+    assert((unsigned long) src0 % 128 == 0);
+    assert((unsigned long) src1 % 128 == 0);
+    hvx_arith_loop_body(HVX_UVector, HVX_Vector, HVX_Vector, hvx_vec_store_u, HVX_OP_MUL);
+}
+
+static inline void hvx_mul_f32_uu(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, uint32_t n) {
+    hvx_arith_loop_body(HVX_UVector, HVX_UVector, HVX_UVector, hvx_vec_store_u, HVX_OP_MUL);
+}
+
+// Dispatchers
+
+static inline void hvx_add_f32(const uint8_t * restrict src0, const uint8_t * restrict src1, uint8_t * restrict dst, const int num_elems) {
+    if (hex_is_aligned((void *) dst, 128) && hex_is_aligned((void *) src0, 128)) {
+        if (hex_is_aligned((void *) src1, 128)) {
+            hvx_add_f32_aa(dst, src0, src1, num_elems);
+        } else {
+            hvx_add_f32_au(dst, src0, src1, num_elems);
+        }
+    } else if (hex_is_aligned((void *) src0, 128) && hex_is_aligned((void *) src1, 128)) {
+        hvx_add_f32_ua(dst, src0, src1, num_elems);
+    } else {
+        hvx_add_f32_uu(dst, src0, src1, num_elems);
+    }
+}
+
+static inline void hvx_sub_f32(const uint8_t * restrict src0, const uint8_t * restrict src1, uint8_t * restrict dst, const int num_elems) {
+    if (hex_is_aligned((void *) dst, 128) && hex_is_aligned((void *) src0, 128)) {
+        if (hex_is_aligned((void *) src1, 128)) {
+            hvx_sub_f32_aa(dst, src0, src1, num_elems);
+        } else {
+            hvx_sub_f32_au(dst, src0, src1, num_elems);
+        }
+    } else if (hex_is_aligned((void *) src0, 128) && hex_is_aligned((void *) src1, 128)) {
+        hvx_sub_f32_ua(dst, src0, src1, num_elems);
+    } else {
+        hvx_sub_f32_uu(dst, src0, src1, num_elems);
+    }
+}
+
+static inline void hvx_mul_f32(const uint8_t * restrict src0, const uint8_t * restrict src1, uint8_t * restrict dst, const int num_elems) {
+    if (hex_is_aligned((void *) dst, 128) && hex_is_aligned((void *) src0, 128)) {
+        if (hex_is_aligned((void *) src1, 128)) {
+            hvx_mul_f32_aa(dst, src0, src1, num_elems);
+        } else {
+            hvx_mul_f32_au(dst, src0, src1, num_elems);
+        }
+    } else if (hex_is_aligned((void *) src0, 128) && hex_is_aligned((void *) src1, 128)) {
+        hvx_mul_f32_ua(dst, src0, src1, num_elems);
+    } else {
+        hvx_mul_f32_uu(dst, src0, src1, num_elems);
+    }
+}
+
+// Optimized aliases (assuming alignment)
+
+static inline void hvx_add_f32_opt(const uint8_t * restrict src0, const uint8_t * restrict src1, uint8_t * restrict dst, const int num_elems) {
+    hvx_add_f32_aa(dst, src0, src1, num_elems);
+}
+
+static inline void hvx_sub_f32_opt(const uint8_t * restrict src0, const uint8_t * restrict src1, uint8_t * restrict dst, const int num_elems) {
+    hvx_sub_f32_aa(dst, src0, src1, num_elems);
+}
+
+static inline void hvx_mul_f32_opt(const uint8_t * restrict src0, const uint8_t * restrict src1, uint8_t * restrict dst, const int num_elems) {
+    hvx_mul_f32_aa(dst, src0, src1, num_elems);
+}
+
+// Mul-Mul Optimized
+
+static inline void hvx_mul_mul_f32_opt(const uint8_t * restrict src0, const uint8_t * restrict src1, const uint8_t * restrict src2, uint8_t * restrict dst, const int num_elems) {
+    assert((unsigned long) dst % 128 == 0);
+    assert((unsigned long) src0 % 128 == 0);
+    assert((unsigned long) src1 % 128 == 0);
+    assert((unsigned long) src2 % 128 == 0);
+
+    HVX_Vector * restrict vdst  = (HVX_Vector *) dst;
+    HVX_Vector * restrict vsrc0 = (HVX_Vector *) src0;
+    HVX_Vector * restrict vsrc1 = (HVX_Vector *) src1;
+    HVX_Vector * restrict vsrc2 = (HVX_Vector *) src2;
+
+    const uint32_t elem_size = sizeof(float);
+    const uint32_t epv  = 128 / elem_size;
+    const uint32_t nvec = num_elems / epv;
+    const uint32_t nloe = num_elems % epv;
+
+    uint32_t i = 0;
+
+    _Pragma("unroll(4)")
+    for (; i < nvec; i++) {
+        HVX_Vector v1 = HVX_OP_MUL(vsrc0[i], vsrc1[i]);
+        vdst[i] = HVX_OP_MUL(v1, vsrc2[i]);
+    }
+
+    if (nloe) {
+        HVX_Vector v1 = HVX_OP_MUL(vsrc0[i], vsrc1[i]);
+        HVX_Vector v2 = HVX_OP_MUL(v1, vsrc2[i]);
+        hvx_vec_store_a((void *) &vdst[i], nloe * elem_size, v2);
+    }
+}
+
+// Scalar Operations
+
+static inline void hvx_add_scalar_f32(const uint8_t * restrict src, const float val, uint8_t * restrict dst, const int num_elems) {
+    // For scalar ops, we'll implement a simple unaligned/aligned check or just use UU loop.
+    // To match previous implementation logic which handled alignment more generally, we can use the loop body pattern
+    // treating 'val' as a splatted vector.
+
+    // We can define a scalar loop body or just reuse the logic.
+    // Since we need to support unaligned src/dst, let's use a macro similar to hvx_arith_loop_body but with scalar input.
+
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+    static const float kInf = INFINITY;
+    const HVX_Vector inf = hvx_vec_splat_fp32(kInf);
+
+    // Using UU for simplicity and correctness on all alignments,
+    // compiler might optimize if inlined and pointers are known aligned?
+    // But 'src' and 'dst' are passed in.
+
+    // Let's check alignment like the original code did or just use UU if we want to be safe and simple.
+    // The original code had separate loops.
+    // Here I will use UU type logic but check alignment for optimization?
+    // Or just use the macro approach?
+
+    // Define a local macro for the scalar operation
+    #define SCALAR_OP(v) \
+        ({ \
+            const HVX_VectorPred pred_inf = Q6_Q_vcmp_eq_VwVw(inf, v); \
+            HVX_Vector out = HVX_OP_ADD(v, val_vec); \
+            Q6_V_vmux_QVV(pred_inf, inf, out); \
+        })
+
+    HVX_UVector * restrict vdst = (HVX_UVector *) dst;
+    HVX_UVector * restrict vsrc = (HVX_UVector *) src;
+
+    const uint32_t elem_size = sizeof(float);
+    const uint32_t epv = 128 / elem_size;
+    const uint32_t nvec = num_elems / epv;
+    const uint32_t nloe = num_elems % epv;
+
+    uint32_t i = 0;
+    _Pragma("unroll(4)")
+    for (; i < nvec; i++) {
+        vdst[i] = SCALAR_OP(vsrc[i]);
+    }
+    if (nloe) {
+        HVX_Vector v = SCALAR_OP(vsrc[i]);
+        hvx_vec_store_u((void *) &vdst[i], nloe * elem_size, v);
+    }
+    #undef SCALAR_OP
+}
+
+static inline void hvx_mul_scalar_f32(const uint8_t * restrict src, const float val, uint8_t * restrict dst, const int num_elems) {
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+
+    HVX_UVector * restrict vdst = (HVX_UVector *) dst;
+    HVX_UVector * restrict vsrc = (HVX_UVector *) src;
+
+    const uint32_t elem_size = sizeof(float);
+    const uint32_t epv = 128 / elem_size;
+    const uint32_t nvec = num_elems / epv;
+    const uint32_t nloe = num_elems % epv;
+
+    uint32_t i = 0;
+    _Pragma("unroll(4)")
+    for (; i < nvec; i++) {
+        vdst[i] = HVX_OP_MUL(vsrc[i], val_vec);
+    }
+    if (nloe) {
+        HVX_Vector v = HVX_OP_MUL(vsrc[i], val_vec);
+        hvx_vec_store_u((void *) &vdst[i], nloe * elem_size, v);
+    }
+}
+
+static inline void hvx_sub_scalar_f32(const uint8_t * restrict src, const float val, uint8_t * restrict dst, const int num_elems) {
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+
+    HVX_UVector * restrict vdst = (HVX_UVector *) dst;
+    HVX_UVector * restrict vsrc = (HVX_UVector *) src;
+
+    const uint32_t elem_size = sizeof(float);
+    const uint32_t epv = 128 / elem_size;
+    const uint32_t nvec = num_elems / epv;
+    const uint32_t nloe = num_elems % epv;
+
+    uint32_t i = 0;
+    _Pragma("unroll(4)")
+    for (; i < nvec; i++) {
+        vdst[i] = HVX_OP_SUB(vsrc[i], val_vec);
+    }
+    if (nloe) {
+        HVX_Vector v = HVX_OP_SUB(vsrc[i], val_vec);
+        hvx_vec_store_u((void *) &vdst[i], nloe * elem_size, v);
+    }
+}
+
+#undef HVX_OP_ADD
+#undef HVX_OP_SUB
+#undef HVX_OP_MUL
+#undef hvx_arith_loop_body
+
+#endif // HVX_ARITH_H
