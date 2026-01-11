@@ -19,7 +19,6 @@ add_library(${HTP_LIB} SHARED
     worker-pool.c
     hex-dma.c
     hvx-sigmoid.c
-    hvx-inverse.c
     hvx-utils.c
     matmul-ops.c
     binary-ops.c

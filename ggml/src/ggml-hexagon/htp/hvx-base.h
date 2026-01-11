@@ -115,5 +115,29 @@ static inline HVX_Vector Q6_Vsf_equals_Vw(HVX_Vector const in)
 }
 #endif
 
+static inline HVX_Vector hvx_vec_i16_from_hf_rnd_sat(HVX_Vector vin) {
+    // This looks complicated.
+    // Ideally should just be Q6_Vh_equals_Vhf(vin)
+    // but that instruction does not do proper rounding.
+
+    // convert to qf32, multiplying by 1.0 in the process.
+    HVX_VectorPair v32 = Q6_Wqf32_vmpy_VhfVhf(vin, Q6_Vh_vsplat_R(0x3C00));
+
+    // 'in-range' values are +/32752.
+    // add 192K to it, convert to sf
+    HVX_Vector v192K = Q6_V_vsplat_R(0x48400000);
+    HVX_Vector vsf_0 = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(Q6_V_lo_W(v32), v192K));
+    HVX_Vector vsf_1 = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(Q6_V_hi_W(v32), v192K));
+
+    // for in-range cases, result is {163858... 229360} so the exponent is always 144.
+    // if we extract bits 21..0 as a signed quantity, and round 6 bits off, that will be the answer.
+    // Start by <<10 to get the final 'sign' bit in bit 15...
+    vsf_0 = Q6_Vw_vasl_VwR(vsf_0, 10);
+    vsf_1 = Q6_Vw_vasl_VwR(vsf_1, 10);
+
+    // now round down to 16
+    return Q6_Vh_vround_VwVw_sat(vsf_1, vsf_0);
+}
+
 
 #endif /* HVX_BASE_H */
