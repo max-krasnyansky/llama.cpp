@@ -5,25 +5,20 @@
 #ifdef HTP_DEBUG
 #    define FARF_HIGH 1
 #endif
-
 #include <HAP_farf.h>
-#include <HAP_mem.h>
 #include <HAP_perf.h>
-#include <HAP_ps.h>
-#include <hexagon_protos.h>
-#include <hexagon_types.h>
+
 #include <math.h>
-#include <qurt_thread.h>
 #include <string.h>
+
+#include "hex-dma.h"
+#include "hvx-utils.h"
 
 #define GGML_COMMON_DECL_C
 #include "ggml-common.h"
 #include "htp-ctx.h"
-#include "htp-dma.h"
 #include "htp-msg.h"
 #include "htp-ops.h"
-#include "hvx-utils.h"
-#include "ops-utils.h"
 
 typedef void (*hvx_elemwise_f32_func)(const uint8_t * src0,
                                       const uint8_t * src1,
@@ -130,9 +125,9 @@ static void binary_job_f32_per_thread(struct htp_ops_context * octx,
         const uint8_t * restrict src1_ptr = data_src1 + i13 * nb13 + i12 * nb12 + i11 * src1_row_size;
 
         if (ir + 1 < src0_end_row) {
-            htp_l2fetch(src0_ptr + ne00, 1, src0_row_size, src0_row_size);
+            hex_l2fetch(src0_ptr + ne00, src0_row_size, src0_row_size, 1);
             if (src1_row_size == src0_row_size) {
-                htp_l2fetch(src1_ptr, 1, src1_row_size, src1_row_size);
+                hex_l2fetch(src1_ptr, src1_row_size, src1_row_size, 1);
             }
         }
 
@@ -210,9 +205,9 @@ static void binary_add_id_job_f32_per_thread(struct htp_ops_context * octx,
         const float * restrict src1_ptr = (const float *) (data_src1 + 0 + 0 + i11 * nb11);
 
         if (ir + 1 < src0_end_row) {
-            htp_l2fetch(src0_ptr + ne00, 1, src0_row_size, src0_row_size);
+            hex_l2fetch(src0_ptr + ne00, src0_row_size, src0_row_size, 1);
             if (src1_row_size == src0_row_size) {
-                htp_l2fetch(src1_ptr + ne10, 1, src1_row_size, src1_row_size);
+                hex_l2fetch(src1_ptr + ne10, src1_row_size, src1_row_size, 1);
             }
         }
 

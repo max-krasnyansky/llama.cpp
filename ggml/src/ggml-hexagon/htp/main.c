@@ -1,17 +1,16 @@
 #pragma clang diagnostic ignored "-Wgnu-zero-variadic-macro-arguments"
 #pragma clang diagnostic ignored "-Wunused-function"
 
-#define FARF_ERROR  1
-#define FARF_HIGH   1
-#define FARF_MEDIUM 0
-#define FARF_LOW    0
+#ifdef HTP_DEBUG
+#    define FARF_HIGH 1
+#endif
+#include <HAP_farf.h>
+#include <HAP_perf.h>
 #include <AEEStdErr.h>
 #include <dspqueue.h>
 #include <HAP_compute_res.h>
 #include <HAP_etm_config.h>
-#include <HAP_farf.h>
 #include <HAP_mem.h>
-#include <HAP_perf.h>
 #include <HAP_power.h>
 #include <HAP_ps.h>
 #include <qurt.h>
@@ -19,13 +18,13 @@
 #include <remote.h>
 #include <string.h>
 
+#include "hex-dma.h"
+
 #define GGML_COMMON_DECL_C
 #include "ggml-common.h"
 #include "htp-ctx.h"
-#include "htp-dma.h"
 #include "htp-msg.h"
 #include "htp-ops.h"
-#include "ops-utils.h"
 #include "worker-pool.h"
 
 AEEResult htp_iface_open(const char * uri, remote_handle64 * handle) {

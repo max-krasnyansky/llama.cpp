@@ -6,10 +6,8 @@
 #    define FARF_HIGH 1
 #endif
 #include <HAP_farf.h>
-#include <HAP_mem.h>
 #include <HAP_perf.h>
-#include <hexagon_protos.h>
-#include <hexagon_types.h>
+
 #include <math.h>
 #include <string.h>
 
@@ -19,7 +17,6 @@
 #include "htp-msg.h"
 #include "htp-ops.h"
 #include "hvx-utils.h"
-#include "ops-utils.h"
 
 #define get_rows_preamble \
     const uint32_t ne00 = octx->src0.ne[0]; \

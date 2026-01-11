@@ -4,7 +4,6 @@
 #include "htp-ctx.h"
 #include "htp-msg.h"
 #include "worker-pool.h"
-#include "ops-utils.h"
 
 #include <assert.h>
 #include <stdint.h>

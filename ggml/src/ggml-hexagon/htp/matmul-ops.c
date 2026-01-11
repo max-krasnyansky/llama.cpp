@@ -8,23 +8,19 @@
 #endif
 
 #include <HAP_farf.h>
-#include <HAP_mem.h>
 #include <HAP_perf.h>
-#include <HAP_ps.h>
-#include <hexagon_protos.h>
-#include <hexagon_types.h>
+
 #include <math.h>
-#include <qurt_thread.h>
 #include <string.h>
+
+#include "hex-dma.h"
+#include "hvx-utils.h"
 
 #define GGML_COMMON_DECL_C
 #include "ggml-common.h"
 #include "htp-ctx.h"
-#include "htp-dma.h"
 #include "htp-msg.h"
 #include "htp-ops.h"
-#include "hvx-utils.h"
-#include "ops-utils.h"
 
 #define MM_SPAD_SRC0_NROWS 16
 #define MM_SPAD_SRC1_NROWS 16
@@ -35,18 +31,6 @@ struct htp_matmul_type {
     void (*vec_dot)(const int n, float * restrict s, const void * restrict vx, const void * restrict vy);
     void (*vec_dot_rx2)(const int n, float * restrict s, const void * restrict vx, uint32_t vx_row_size, const void * restrict vy);
 };
-
-typedef struct {
-    HVX_Vector v[2];
-} HVX_Vector_x2;
-
-typedef struct {
-    HVX_Vector v[4];
-} HVX_Vector_x4;
-
-typedef struct {
-    HVX_Vector v[8];
-} HVX_Vector_x8;
 
 // vdelta control to replicate first 4x fp32 values across lanes
 static const uint8_t __attribute__((aligned(128))) repl_4x_fp32[128] = {
@@ -1811,7 +1795,7 @@ static void quantize_fp32_q8x4x2(const struct htp_tensor * src,
     memset(tmp_data, 0, src_row_size_padded);  // zero-out temp row data for padding
 
     for (uint32_t i = ir_first; i < ir_last; ++i) {
-        htp_l2fetch(src_data, 2, src_row_size, src_row_size);
+        hex_l2fetch(src_data, src_row_size, src_row_size, 2);
         hvx_copy_fp32_aa(tmp_data, src_data, ne0);
 
         // FARF(HIGH, "quantize-q8x4-row: %u\n", i);
@@ -1848,7 +1832,7 @@ static void quantize_fp32_fp16(const struct htp_tensor * src, uint8_t * restrict
     uint8_t * restrict dst_data = (uint8_t *) dst       + (dst_stride * ir_first);
 
     for (uint32_t i = ir_first; i < ir_last; ++i) {
-        htp_l2fetch(src_data, 2, src_row_size, src_stride);
+        hex_l2fetch(src_data, src_row_size, src_stride, 2);
         hvx_copy_fp16_fp32_au(dst_data, src_data, ne0);
 
         dst_data += dst_stride;
@@ -1884,7 +1868,7 @@ static void quantize_fp16_fp16(const struct htp_tensor * src, uint8_t * restrict
     uint8_t * restrict dst_data = (uint8_t *) dst       + (dst_stride * ir_first);
 
     for (uint32_t i = ir_first; i < ir_last; ++i) {
-        htp_l2fetch(src_data, 2, src_row_size, src_stride);
+        hex_l2fetch(src_data, src_row_size, src_stride, 2);
         hvx_copy_fp16_au(dst_data, src_data, ne0);
 
         dst_data += dst_stride;

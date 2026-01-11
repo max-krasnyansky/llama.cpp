@@ -1,28 +1,14 @@
 #ifndef HVX_UTILS_H
 #define HVX_UTILS_H
 
-#include "ops-utils.h"
-
 #include <stdbool.h>
 #include <stdint.h>
 
-#define SIZEOF_FP32 (4)
-#define SIZEOF_FP16 (2)
-#define VLEN        (128)
-#define VLEN_FP32   (VLEN / SIZEOF_FP32)
-#define VLEN_FP16   (VLEN / SIZEOF_FP16)
+#include "hex-utils.h"
 
+#include "hvx-types.h"
 #include "hvx-copy.h"
 #include "hvx-scale.h"
-
-typedef union {
-    HVX_Vector v;
-    uint8_t    b[VLEN];
-    uint16_t   h[VLEN_FP16];
-    uint32_t   w[VLEN_FP32];
-    __fp16     fp16[VLEN_FP16];
-    float      fp32[VLEN_FP32];
-} __attribute__((aligned(VLEN), packed)) HVX_VectorAlias;
 
 /* Q6_Vsf_equals_Vw is only available on v73+.*/
 #if __HVX_ARCH__ < 73
@@ -59,13 +45,6 @@ static inline HVX_Vector hvx_vec_repl4(HVX_Vector v) {
 
     HVX_Vector ctrl = *(HVX_Vector *) repl;
     return Q6_V_vdelta_VV(v, ctrl);
-}
-
-/* Return whether 'n' elements from vector are in the one chunk of 'chunk_size'. */
-static __attribute__((always_inline)) int32_t is_in_one_chunk(void * addr, uint32_t n, uint32_t chunk_size) {
-    uint32_t left_off  = (size_t) addr & (chunk_size - 1);
-    uint32_t right_off = left_off + n;
-    return right_off <= chunk_size;
 }
 
 static void hvx_vec_dump_fp16_n(char * pref, HVX_Vector v, uint32_t n) {
@@ -855,7 +834,7 @@ static inline void hvx_sigmoid_f32(const uint8_t * restrict src, uint8_t * restr
         slinep = slinec;
     }
     if (leftover > 0) {
-        slinec = (is_in_one_chunk(input_v_ptr, leftover_size, 128) ? slinep : *input_v_ptr++);
+        slinec = (hex_is_one_chunk(input_v_ptr, leftover_size, 128) ? slinep : *input_v_ptr++);
 
         sline = Q6_V_valign_VVR(slinec, slinep, (size_t) input);
 

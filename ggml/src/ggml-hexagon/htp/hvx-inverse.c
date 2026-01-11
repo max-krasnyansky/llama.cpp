@@ -2,19 +2,16 @@
 #pragma clang diagnostic ignored "-Wunused-function"
 #pragma clang diagnostic ignored "-Wunused-but-set-variable"
 
-#include <hexagon_protos.h>
-#include <hexagon_types.h>
+#ifdef HTP_DEBUG
+#    define FARF_HIGH 1
+#endif
+#include <HAP_farf.h>
+#include <HAP_perf.h>
+
 #include <math.h>
 #include <string.h>
 
-#define GGML_COMMON_DECL_C
-#include "ggml-common.h"
-#include "htp-ctx.h"
-#include "htp-dma.h"
-#include "htp-msg.h"
-#include "htp-ops.h"
 #include "hvx-utils.h"
-#include "ops-utils.h"
 
 static inline HVX_Vector hvx_vec_inverse_fp32_guard(HVX_Vector v_sf, HVX_Vector nan_inf_mask) {
     HVX_Vector out = hvx_vec_inverse_fp32(v_sf);

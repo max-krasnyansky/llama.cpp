@@ -6,23 +6,19 @@
 #    define FARF_HIGH 1
 #endif
 #include <HAP_farf.h>
-#include <HAP_mem.h>
 #include <HAP_perf.h>
-#include <HAP_ps.h>
-#include <hexagon_protos.h>
-#include <hexagon_types.h>
+
 #include <math.h>
-#include <qurt_thread.h>
 #include <string.h>
+
+#include "hex-dma.h"
+#include "hvx-utils.h"
 
 #define GGML_COMMON_DECL_C
 #include "ggml-common.h"
 #include "htp-ctx.h"
-#include "htp-dma.h"
 #include "htp-msg.h"
 #include "htp-ops.h"
-#include "hvx-utils.h"
-#include "ops-utils.h"
 
 #define htp_softmax_preamble3                              \
     const uint32_t ne00 = src0->ne[0];                     \

@@ -6,23 +6,19 @@
 #    define FARF_HIGH 1
 #endif
 #include <HAP_farf.h>
-#include <HAP_mem.h>
 #include <HAP_perf.h>
-#include <HAP_ps.h>
-#include <hexagon_protos.h>
-#include <hexagon_types.h>
+
 #include <math.h>
-#include <qurt_thread.h>
 #include <string.h>
+
+#include "hex-dma.h"
+#include "hvx-utils.h"
 
 #define GGML_COMMON_DECL_C
 #include "ggml-common.h"
 #include "htp-ctx.h"
-#include "htp-dma.h"
 #include "htp-msg.h"
 #include "htp-ops.h"
-#include "hvx-utils.h"
-#include "ops-utils.h"
 
 // Redefined the types GGML_ROPE_TYPE_NORMAL & GGML_ROPE_TYPE_NEOX as we cant include ggml.h
 #define HTP_ROPE_TYPE_NORMAL 0

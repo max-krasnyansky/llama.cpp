@@ -5,25 +5,20 @@
 #ifdef HTP_DEBUG
 #    define FARF_HIGH 1
 #endif
-
 #include <HAP_farf.h>
-#include <HAP_mem.h>
 #include <HAP_perf.h>
-#include <HAP_ps.h>
-#include <hexagon_protos.h>
-#include <hexagon_types.h>
+
 #include <math.h>
-#include <qurt_thread.h>
 #include <string.h>
+
+#include "hex-dma.h"
+#include "hvx-utils.h"
 
 #define GGML_COMMON_DECL_C
 #include "ggml-common.h"
 #include "htp-ctx.h"
-#include "htp-dma.h"
 #include "htp-msg.h"
 #include "htp-ops.h"
-#include "hvx-utils.h"
-#include "ops-utils.h"
 
 #define htp_unary_preamble            \
     const uint32_t ne00 = src->ne[0]; \
@@ -101,7 +96,7 @@ static void scale_htp_f32(const float * restrict src,
         float * restrict dst_local       = dst + (ir * row_elems);
 
         if (ir + 1 < num_rows) {
-            htp_l2fetch(src_local + row_elems, 1, row_size, row_size);
+            hex_l2fetch(src_local + row_elems, row_size, row_size, 1);
         }
 
         hvx_scale_offset_f32((uint8_t *) dst_local, (const uint8_t *) src_local, row_elems, scale, bias);
@@ -124,7 +119,7 @@ static void rms_norm_htp_f32(const float * restrict src,
         float * restrict dst_local       = dst + (ir * row_elems);
 
         if (ir + 1 < num_rows) {
-            htp_l2fetch(src_local + row_elems, 1, row_size, row_size);
+            htp_l2fetch(src_local + row_elems, row_size, row_size, 1);
         }
 
         if (1 == opt_path) {

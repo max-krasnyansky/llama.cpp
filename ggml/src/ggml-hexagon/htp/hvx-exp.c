@@ -2,19 +2,16 @@
 #pragma clang diagnostic ignored "-Wunused-function"
 #pragma clang diagnostic ignored "-Wunused-but-set-variable"
 
-#include <hexagon_protos.h>
-#include <hexagon_types.h>
+#ifdef HTP_DEBUG
+#    define FARF_HIGH 1
+#endif
+#include <HAP_farf.h>
+#include <HAP_perf.h>
+
 #include <math.h>
 #include <string.h>
 
-#define GGML_COMMON_DECL_C
-#include "ggml-common.h"
-#include "htp-ctx.h"
-#include "htp-dma.h"
-#include "htp-msg.h"
-#include "htp-ops.h"
 #include "hvx-utils.h"
-#include "ops-utils.h"
 
 static inline HVX_Vector hvx_vec_exp_fp32_guard(HVX_Vector in_vec, HVX_Vector max_exp, HVX_Vector inf) {
     const HVX_VectorPred pred0 = Q6_Q_vcmp_gt_VsfVsf(in_vec, max_exp);
@@ -31,13 +28,11 @@ void hvx_exp_f32(const uint8_t * restrict src, uint8_t * restrict dst, const int
     int unaligned_addr = 0;
     int unaligned_loop = 0;
     if ((0 == htp_is_aligned((void *) src, VLEN)) || (0 == htp_is_aligned((void *) dst, VLEN))) {
-        FARF(HIGH, "hvx_exp_f32: unaligned address in hvx op, possibly slower execution\n");
         unaligned_addr = 1;
     }
     // assert((0 == unaligned_addr) || (0 == num_elems_whole));
     if ((1 == unaligned_addr) && (num_elems_whole != 0)) {
         unaligned_loop = 1;
-        FARF(HIGH, "hvx_exp_f32: unaligned loop in hvx op, possibly slower execution\n");
     }
 
     HVX_Vector vec_out = Q6_V_vzero();
