@@ -208,80 +208,159 @@ static inline void hvx_mul_mul_f32_opt(uint8_t * restrict dst, const uint8_t * r
 
 // Scalar Operations
 
-static inline void hvx_add_scalar_f32(uint8_t * restrict dst, const uint8_t * restrict src, const float val, const int num_elems) {
+#define hvx_scalar_loop_body(dst_type, src_type, vec_store, scalar_op_macro)   \
+    do {                                                                       \
+        dst_type * restrict vdst = (dst_type *) dst;                           \
+        src_type * restrict vsrc = (src_type *) src;                           \
+                                                                               \
+        const uint32_t elem_size = sizeof(float);                              \
+        const uint32_t epv  = 128 / elem_size;                                 \
+        const uint32_t nvec = n / epv;                                         \
+        const uint32_t nloe = n % epv;                                         \
+                                                                               \
+        uint32_t i = 0;                                                        \
+                                                                               \
+        _Pragma("unroll(4)")                                                   \
+        for (; i < nvec; i++) {                                                \
+            HVX_Vector v = vsrc[i];                                            \
+            vdst[i] = scalar_op_macro(v);                                      \
+        }                                                                      \
+        if (nloe) {                                                            \
+            HVX_Vector v = vsrc[i];                                            \
+            v = scalar_op_macro(v);                                            \
+            vec_store((void *) &vdst[i], nloe * elem_size, v);                 \
+        }                                                                      \
+    } while(0)
+
+#define HVX_OP_ADD_SCALAR(v) \
+    ({ \
+        const HVX_VectorPred pred_inf = Q6_Q_vcmp_eq_VwVw(inf, v); \
+        HVX_Vector out = HVX_OP_ADD(v, val_vec); \
+        Q6_V_vmux_QVV(pred_inf, inf, out); \
+    })
+
+#define HVX_OP_MUL_SCALAR(v) HVX_OP_MUL(v, val_vec)
+#define HVX_OP_SUB_SCALAR(v) HVX_OP_SUB(v, val_vec)
+
+// Add Scalar Variants
+
+static inline void hvx_add_scalar_f32_aa(uint8_t * restrict dst, const uint8_t * restrict src, const float val, uint32_t n) {
     const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
     static const float kInf = INFINITY;
     const HVX_Vector inf = hvx_vec_splat_fp32(kInf);
+    assert((unsigned long) dst % 128 == 0);
+    assert((unsigned long) src % 128 == 0);
+    hvx_scalar_loop_body(HVX_Vector, HVX_Vector, hvx_vec_store_a, HVX_OP_ADD_SCALAR);
+}
 
-    // Define a local macro for the scalar operation
-    #define SCALAR_OP(v) \
-        ({ \
-            const HVX_VectorPred pred_inf = Q6_Q_vcmp_eq_VwVw(inf, v); \
-            HVX_Vector out = HVX_OP_ADD(v, val_vec); \
-            Q6_V_vmux_QVV(pred_inf, inf, out); \
-        })
+static inline void hvx_add_scalar_f32_au(uint8_t * restrict dst, const uint8_t * restrict src, const float val, uint32_t n) {
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+    static const float kInf = INFINITY;
+    const HVX_Vector inf = hvx_vec_splat_fp32(kInf);
+    assert((unsigned long) dst % 128 == 0);
+    hvx_scalar_loop_body(HVX_Vector, HVX_UVector, hvx_vec_store_a, HVX_OP_ADD_SCALAR);
+}
 
-    HVX_UVector * restrict vdst = (HVX_UVector *) dst;
-    HVX_UVector * restrict vsrc = (HVX_UVector *) src;
+static inline void hvx_add_scalar_f32_ua(uint8_t * restrict dst, const uint8_t * restrict src, const float val, uint32_t n) {
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+    static const float kInf = INFINITY;
+    const HVX_Vector inf = hvx_vec_splat_fp32(kInf);
+    assert((unsigned long) src % 128 == 0);
+    hvx_scalar_loop_body(HVX_UVector, HVX_Vector, hvx_vec_store_u, HVX_OP_ADD_SCALAR);
+}
 
-    const uint32_t elem_size = sizeof(float);
-    const uint32_t epv = 128 / elem_size;
-    const uint32_t nvec = num_elems / epv;
-    const uint32_t nloe = num_elems % epv;
+static inline void hvx_add_scalar_f32_uu(uint8_t * restrict dst, const uint8_t * restrict src, const float val, uint32_t n) {
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+    static const float kInf = INFINITY;
+    const HVX_Vector inf = hvx_vec_splat_fp32(kInf);
+    hvx_scalar_loop_body(HVX_UVector, HVX_UVector, hvx_vec_store_u, HVX_OP_ADD_SCALAR);
+}
 
-    uint32_t i = 0;
-    _Pragma("unroll(4)")
-    for (; i < nvec; i++) {
-        vdst[i] = SCALAR_OP(vsrc[i]);
+// Sub Scalar Variants
+
+static inline void hvx_sub_scalar_f32_aa(uint8_t * restrict dst, const uint8_t * restrict src, const float val, uint32_t n) {
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+    assert((unsigned long) dst % 128 == 0);
+    assert((unsigned long) src % 128 == 0);
+    hvx_scalar_loop_body(HVX_Vector, HVX_Vector, hvx_vec_store_a, HVX_OP_SUB_SCALAR);
+}
+
+static inline void hvx_sub_scalar_f32_au(uint8_t * restrict dst, const uint8_t * restrict src, const float val, uint32_t n) {
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+    assert((unsigned long) dst % 128 == 0);
+    hvx_scalar_loop_body(HVX_Vector, HVX_UVector, hvx_vec_store_a, HVX_OP_SUB_SCALAR);
+}
+
+static inline void hvx_sub_scalar_f32_ua(uint8_t * restrict dst, const uint8_t * restrict src, const float val, uint32_t n) {
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+    assert((unsigned long) src % 128 == 0);
+    hvx_scalar_loop_body(HVX_UVector, HVX_Vector, hvx_vec_store_u, HVX_OP_SUB_SCALAR);
+}
+
+static inline void hvx_sub_scalar_f32_uu(uint8_t * restrict dst, const uint8_t * restrict src, const float val, uint32_t n) {
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+    hvx_scalar_loop_body(HVX_UVector, HVX_UVector, hvx_vec_store_u, HVX_OP_SUB_SCALAR);
+}
+
+// Mul Scalar Variants
+
+static inline void hvx_mul_scalar_f32_aa(uint8_t * restrict dst, const uint8_t * restrict src, const float val, uint32_t n) {
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+    assert((unsigned long) dst % 128 == 0);
+    assert((unsigned long) src % 128 == 0);
+    hvx_scalar_loop_body(HVX_Vector, HVX_Vector, hvx_vec_store_a, HVX_OP_MUL_SCALAR);
+}
+
+static inline void hvx_mul_scalar_f32_au(uint8_t * restrict dst, const uint8_t * restrict src, const float val, uint32_t n) {
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+    assert((unsigned long) dst % 128 == 0);
+    hvx_scalar_loop_body(HVX_Vector, HVX_UVector, hvx_vec_store_a, HVX_OP_MUL_SCALAR);
+}
+
+static inline void hvx_mul_scalar_f32_ua(uint8_t * restrict dst, const uint8_t * restrict src, const float val, uint32_t n) {
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+    assert((unsigned long) src % 128 == 0);
+    hvx_scalar_loop_body(HVX_UVector, HVX_Vector, hvx_vec_store_u, HVX_OP_MUL_SCALAR);
+}
+
+static inline void hvx_mul_scalar_f32_uu(uint8_t * restrict dst, const uint8_t * restrict src, const float val, uint32_t n) {
+    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
+    hvx_scalar_loop_body(HVX_UVector, HVX_UVector, hvx_vec_store_u, HVX_OP_MUL_SCALAR);
+}
+
+static inline void hvx_add_scalar_f32(uint8_t * restrict dst, const uint8_t * restrict src, const float val, const int num_elems) {
+    if (hex_is_aligned((void *) dst, 128) && hex_is_aligned((void *) src, 128)) {
+        hvx_add_scalar_f32_aa(dst, src, val, num_elems);
+    } else if (hex_is_aligned((void *) dst, 128)) {
+        hvx_add_scalar_f32_au(dst, src, val, num_elems);
+    } else if (hex_is_aligned((void *) src, 128)) {
+        hvx_add_scalar_f32_ua(dst, src, val, num_elems);
+    } else {
+        hvx_add_scalar_f32_uu(dst, src, val, num_elems);
     }
-    if (nloe) {
-        HVX_Vector v = SCALAR_OP(vsrc[i]);
-        hvx_vec_store_u((void *) &vdst[i], nloe * elem_size, v);
-    }
-    #undef SCALAR_OP
 }
 
 static inline void hvx_mul_scalar_f32(uint8_t * restrict dst, const uint8_t * restrict src, const float val, const int num_elems) {
-    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
-
-    HVX_UVector * restrict vdst = (HVX_UVector *) dst;
-    HVX_UVector * restrict vsrc = (HVX_UVector *) src;
-
-    const uint32_t elem_size = sizeof(float);
-    const uint32_t epv = 128 / elem_size;
-    const uint32_t nvec = num_elems / epv;
-    const uint32_t nloe = num_elems % epv;
-
-    uint32_t i = 0;
-    _Pragma("unroll(4)")
-    for (; i < nvec; i++) {
-        vdst[i] = HVX_OP_MUL(vsrc[i], val_vec);
-    }
-    if (nloe) {
-        HVX_Vector v = HVX_OP_MUL(vsrc[i], val_vec);
-        hvx_vec_store_u((void *) &vdst[i], nloe * elem_size, v);
+    if (hex_is_aligned((void *) dst, 128) && hex_is_aligned((void *) src, 128)) {
+        hvx_mul_scalar_f32_aa(dst, src, val, num_elems);
+    } else if (hex_is_aligned((void *) dst, 128)) {
+        hvx_mul_scalar_f32_au(dst, src, val, num_elems);
+    } else if (hex_is_aligned((void *) src, 128)) {
+        hvx_mul_scalar_f32_ua(dst, src, val, num_elems);
+    } else {
+        hvx_mul_scalar_f32_uu(dst, src, val, num_elems);
     }
 }
 
 static inline void hvx_sub_scalar_f32(uint8_t * restrict dst, const uint8_t * restrict src, const float val, const int num_elems) {
-    const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
-
-    HVX_UVector * restrict vdst = (HVX_UVector *) dst;
-    HVX_UVector * restrict vsrc = (HVX_UVector *) src;
-
-    const uint32_t elem_size = sizeof(float);
-    const uint32_t epv = 128 / elem_size;
-    const uint32_t nvec = num_elems / epv;
-    const uint32_t nloe = num_elems % epv;
-
-    uint32_t i = 0;
-    _Pragma("unroll(4)")
-    for (; i < nvec; i++) {
-        vdst[i] = HVX_OP_SUB(vsrc[i], val_vec);
-    }
-    if (nloe) {
-        HVX_Vector v = HVX_OP_SUB(vsrc[i], val_vec);
-        hvx_vec_store_u((void *) &vdst[i], nloe * elem_size, v);
+    if (hex_is_aligned((void *) dst, 128) && hex_is_aligned((void *) src, 128)) {
+        hvx_sub_scalar_f32_aa(dst, src, val, num_elems);
+    } else if (hex_is_aligned((void *) dst, 128)) {
+        hvx_sub_scalar_f32_au(dst, src, val, num_elems);
+    } else if (hex_is_aligned((void *) src, 128)) {
+        hvx_sub_scalar_f32_ua(dst, src, val, num_elems);
+    } else {
+        hvx_sub_scalar_f32_uu(dst, src, val, num_elems);
     }
 }
 
@@ -289,5 +368,9 @@ static inline void hvx_sub_scalar_f32(uint8_t * restrict dst, const uint8_t * re
 #undef HVX_OP_SUB
 #undef HVX_OP_MUL
 #undef hvx_arith_loop_body
+#undef HVX_OP_ADD_SCALAR
+#undef HVX_OP_SUB_SCALAR
+#undef HVX_OP_MUL_SCALAR
+#undef hvx_scalar_loop_body
 
 #endif // HVX_ARITH_H
