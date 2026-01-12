@@ -231,13 +231,11 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
 
     const size_t size_k_block = size_k_row_padded * FLASH_ATTN_BLOCK_SIZE;
     const size_t size_v_block = size_v_row_padded * FLASH_ATTN_BLOCK_SIZE;
-    const size_t size_m_block = hex_round_up(FLASH_ATTN_BLOCK_SIZE * sizeof(__fp16), 128);
 
     // Scratchpad buffers for Q, K, V, Mask, and VKQ32 accumulator
     uint8_t * spad_q = octx->src0_spad.data + octx->src0_spad.size_per_thread * ith;
     uint8_t * spad_k = octx->src1_spad.data + octx->src1_spad.size_per_thread * ith;
     uint8_t * spad_v = octx->src2_spad.data + octx->src2_spad.size_per_thread * ith;
-    uint8_t * spad_m = octx->src3_spad.data + octx->src3_spad.size_per_thread * ith;
     uint8_t * spad_a = octx->dst_spad.data  + octx->dst_spad.size_per_thread  * ith;
 
     const uint32_t n_head = neq2;
@@ -274,7 +272,14 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
         if (mask) {
             const uint32_t im2 = fastmodulo(iq2, mask->ne[2], &octx->src3_div2);
             const uint32_t im3 = fastmodulo(iq3, mask->ne[3], &octx->src3_div3);
-            mp_base = (const __fp16 *) ((const uint8_t *) mask->data + iq1*mask->nb[1] + im2*mask->nb[2] + im3*mask->nb[3]);
+            const uint32_t im1 = (mask->ne[1] == 1) ? 0 : iq1;
+
+            size_t mask_row_bytes = mask->ne[0] * sizeof(__fp16);
+            size_t mask_row_stride = hex_round_up(mask_row_bytes, 128); // bytes
+            size_t stride1 = mask_row_stride / 2; // elements
+
+            mp_base = (const __fp16 *) octx->src3_spad.data;
+            mp_base += im3 * mask->ne[2] * mask->ne[1] * stride1 + im2 * mask->ne[1] * stride1 + im1 * stride1;
         }
 
         const uint32_t n_blocks = (nek1 + FLASH_ATTN_BLOCK_SIZE - 1) / FLASH_ATTN_BLOCK_SIZE;
@@ -293,14 +298,6 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
             const uint8_t * v_src = (const uint8_t *) v->data + (ic_start*nbv1 + iv2*nbv2 + iv3*nbv3);
             uint8_t * v_dst = spad_v + (ib % 2) * size_v_block;
             dma_queue_push(dma, dma_make_ptr(v_dst, v_src), size_v_row_padded, nbv1, size_v_row, current_block_size);
-
-            // Mask
-            if (mask) {
-                const uint8_t * m_src = (const uint8_t *) (mp_base + ic_start);
-                uint8_t * m_dst = spad_m + (ib % 2) * size_m_block;
-                // Mask is 1D contiguous for this row
-                dma_queue_push(dma, dma_make_ptr(m_dst, m_src), current_block_size * 2, current_block_size * 2, current_block_size * 2, 1);
-            }
         }
 
         const uint8_t * q_ptr_vtcm = dma_queue_pop(dma).dst;
@@ -312,7 +309,6 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
             // Wait for DMA
             uint8_t * k_base = dma_queue_pop(dma).dst; // K
             uint8_t * v_base = dma_queue_pop(dma).dst; // V
-            __fp16  * m_base = mask ? dma_queue_pop(dma).dst : NULL; // M
 
             // Inner loop processing the block from VTCM
             uint32_t ic = 0;
@@ -342,7 +338,7 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
 
                 // 3. Mask
                 if (mask) {
-                    const __fp16 * mp = m_base + ic;
+                    const __fp16 * mp = mp_base + ic_start + ic;
                     HVX_Vector m_vals_fp16 = *(const HVX_UVector *) mp;
 
                     HVX_Vector one_fp16 = Q6_Vh_vsplat_R(0x3c00);
@@ -404,7 +400,7 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
                 }
 
                 if (mask) {
-                    const float m_val = m_base[ic];
+                    const float m_val = mp_base[ic_start + ic];
                     s_val += slope * m_val;
                 }
 
@@ -440,12 +436,6 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
                 // V
                 const uint8_t * v_src = (const uint8_t *) v->data + (next_ic_start*nbv1 + iv2*nbv2 + iv3*nbv3);
                 dma_queue_push(dma, dma_make_ptr(v_base, v_src), size_v_row_padded, nbv1, size_v_row, next_block_size);
-
-                // Mask
-                if (mask) {
-                    const uint8_t * m_src = (const uint8_t *) (mp_base + next_ic_start);
-                    dma_queue_push(dma, dma_make_ptr(m_base, m_src), next_block_size * 2, next_block_size * 2, next_block_size * 2, 1);
-                }
             }
         }
 
@@ -525,20 +515,28 @@ int op_flash_attn_ext(struct htp_ops_context * octx) {
     size_t size_q_block = size_q_row_padded * 1; // single row for now
     size_t size_k_block = size_k_row_padded * FLASH_ATTN_BLOCK_SIZE;
     size_t size_v_block = size_v_row_padded * FLASH_ATTN_BLOCK_SIZE;
-    size_t size_m_block = hex_round_up(FLASH_ATTN_BLOCK_SIZE * sizeof(__fp16), 128);
 
     size_t size_vkq_acc = hex_round_up(v->ne[0] * sizeof(float), 128); // VKQ32
 
     octx->src0_spad.size_per_thread = size_q_block * 1;
     octx->src1_spad.size_per_thread = size_k_block * 2;
     octx->src2_spad.size_per_thread = size_v_block * 2;
-    octx->src3_spad.size_per_thread = mask ? size_m_block * 2 : 0;
+    octx->src3_spad.size_per_thread = 0;
     octx->dst_spad.size_per_thread  = size_vkq_acc;
 
     octx->src0_spad.size = octx->src0_spad.size_per_thread * octx->n_threads;
     octx->src1_spad.size = octx->src1_spad.size_per_thread * octx->n_threads;
     octx->src2_spad.size = octx->src2_spad.size_per_thread * octx->n_threads;
-    octx->src3_spad.size = octx->src3_spad.size_per_thread * octx->n_threads;
+
+    size_t mask_row_stride = 0;
+    if (mask) {
+        size_t mask_row_bytes = mask->ne[0] * sizeof(__fp16);
+        mask_row_stride = hex_round_up(mask_row_bytes, 128);
+        octx->src3_spad.size = mask_row_stride * mask->ne[1] * mask->ne[2] * mask->ne[3];
+    } else {
+        octx->src3_spad.size = 0;
+    }
+
     octx->dst_spad.size  = octx->dst_spad.size_per_thread  * octx->n_threads;
 
     size_t total_spad = octx->src0_spad.size + octx->src1_spad.size + octx->src2_spad.size + octx->src3_spad.size + octx->dst_spad.size;
@@ -552,6 +550,28 @@ int op_flash_attn_ext(struct htp_ops_context * octx) {
     octx->src2_spad.data = octx->src1_spad.data + octx->src1_spad.size;
     octx->src3_spad.data = octx->src2_spad.data + octx->src2_spad.size;
     octx->dst_spad.data  = octx->src3_spad.data + octx->src3_spad.size;
+
+    if (mask) {
+        dma_queue * dma = octx->ctx->dma[0];
+        uint8_t * dst_base = octx->src3_spad.data;
+        const size_t width = mask->ne[0] * sizeof(__fp16);
+
+        for (uint32_t i3 = 0; i3 < mask->ne[3]; ++i3) {
+            for (uint32_t i2 = 0; i2 < mask->ne[2]; ++i2) {
+                const uint8_t * src_ptr = (const uint8_t *) mask->data + i3 * mask->nb[3] + i2 * mask->nb[2];
+                uint8_t * dst_ptr = dst_base + (i3 * mask->ne[2] + i2) * mask->ne[1] * mask_row_stride;
+
+                while (!dma_queue_push(dma, dma_make_ptr(dst_ptr, src_ptr),
+                                       mask_row_stride, mask->nb[1], width, mask->ne[1])) {
+                    dma_queue_pop(dma);
+                }
+            }
+        }
+
+        while (dma->push_idx != dma->pop_idx) {
+            dma_queue_pop(dma);
+        }
+    }
 
     if (!(octx->flags & HTP_OPFLAGS_SKIP_COMPUTE)) {
         worker_pool_run_func(octx->ctx->worker_pool, htp_flash_attn_ext_job, octx, octx->n_threads);
