@@ -17,6 +17,7 @@
 #include "hvx-base.h"
 #include "hvx-arith.h"
 
+float hvx_sum_of_squares_f32(const uint8_t * restrict src, const int num_elems);
 float hvx_self_max_f32(const uint8_t * restrict src, const int num_elems);
 float hvx_self_sum_f32(const uint8_t * restrict src, const int num_elems);
 

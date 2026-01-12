@@ -8,7 +8,6 @@
 
 #include "hvx-base.h"
 #include "hex-utils.h"
-#include "hvx-reduce.h"
 
 //
 // Binary operations (add, mul, sub)
@@ -444,67 +443,6 @@ static inline void hvx_clamp_scalar_f32(uint8_t * restrict dst, const uint8_t * 
     }
 }
 
-// SUM OF SQUARES
-
-#define HVX_OP_SUM_SQ(v) \
-    do { \
-        HVX_Vector sq = Q6_Vqf32_vmpy_VsfVsf(v, v); \
-        sum_vec_acc = Q6_Vqf32_vadd_Vqf32Vqf32(sum_vec_acc, sq); \
-    } while(0)
-
-#define HVX_OP_SUM_SQ_TAIL(v, nbytes) \
-    do { \
-        HVX_Vector zero_vec = Q6_V_vsplat_R(0x00000000); \
-        HVX_Vector vec_left_sq = Q6_Vqf32_vmpy_VsfVsf(v, v); \
-        HVX_Vector vec_tmp     = Q6_V_valign_VVR(vec_left_sq, zero_vec, nbytes); \
-        sum_vec_acc = Q6_Vqf32_vadd_Vqf32Vqf32(sum_vec_acc, vec_tmp); \
-    } while(0)
-
-
-#define hvx_reduce_loop_body(src_type, vec_acc_op, vec_acc_op_tail) \
-    do { \
-        src_type * restrict vsrc = (src_type *) src; \
-        const uint32_t elem_size = sizeof(float); \
-        const uint32_t epv  = 128 / elem_size; \
-        const uint32_t nvec = n / epv; \
-        const uint32_t nloe = n % epv; \
-        uint32_t i = 0; \
-        _Pragma("unroll(4)") \
-        for (; i < nvec; i++) { \
-            vec_acc_op(vsrc[i]); \
-        } \
-        if (nloe) { \
-            const float * srcf = (const float *) src + i * epv; \
-            HVX_Vector vec_left = *(HVX_UVector *) srcf; \
-            vec_acc_op_tail(vec_left, nloe * elem_size); \
-        } \
-    } while(0)
-
-static inline float hvx_sum_of_squares_f32_a(const uint8_t * restrict src, uint32_t n) {
-    HVX_Vector sum_vec_acc = Q6_V_vsplat_R(0x00000000);
-    assert((unsigned long) src % 128 == 0);
-    hvx_reduce_loop_body(HVX_Vector, HVX_OP_SUM_SQ, HVX_OP_SUM_SQ_TAIL);
-
-    HVX_Vector v = hvx_vec_qf32_reduce_sum(sum_vec_acc);
-    return hvx_vec_get_fp32(Q6_Vsf_equals_Vqf32(v));
-}
-
-static inline float hvx_sum_of_squares_f32_u(const uint8_t * restrict src, uint32_t n) {
-    HVX_Vector sum_vec_acc = Q6_V_vsplat_R(0x00000000);
-    hvx_reduce_loop_body(HVX_UVector, HVX_OP_SUM_SQ, HVX_OP_SUM_SQ_TAIL);
-
-    HVX_Vector v = hvx_vec_qf32_reduce_sum(sum_vec_acc);
-    return hvx_vec_get_fp32(Q6_Vsf_equals_Vqf32(v));
-}
-
-static inline float hvx_sum_of_squares_f32(const uint8_t * restrict src, const int num_elems) {
-    if (hex_is_aligned((void *) src, 128)) {
-        return hvx_sum_of_squares_f32_a(src, num_elems);
-    } else {
-        return hvx_sum_of_squares_f32_u(src, num_elems);
-    }
-}
-
 #undef HVX_OP_ADD
 #undef HVX_OP_SUB
 #undef HVX_OP_MUL
@@ -515,8 +453,5 @@ static inline float hvx_sum_of_squares_f32(const uint8_t * restrict src, const i
 #undef hvx_scalar_loop_body
 #undef HVX_OP_MIN_SCALAR
 #undef HVX_OP_CLAMP_SCALAR
-#undef HVX_OP_SUM_SQ
-#undef HVX_OP_SUM_SQ_TAIL
-#undef hvx_reduce_loop_body
 
 #endif // HVX_ARITH_H
