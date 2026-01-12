@@ -274,9 +274,7 @@ static void flash_attn_ext_f16_thread(struct htp_ops_context * octx, int ith, in
             const uint32_t im3 = fastmodulo(iq3, mask->ne[3], &octx->src3_div3);
             const uint32_t im1 = (mask->ne[1] == 1) ? 0 : iq1;
 
-            size_t mask_row_bytes = mask->ne[0] * sizeof(__fp16);
-            size_t mask_row_stride = hex_round_up(mask_row_bytes, 128); // bytes
-            size_t stride1 = mask_row_stride / 2; // elements
+            size_t stride1 = mask->ne[0]; // elements
 
             mp_base = (const __fp16 *) octx->src3_spad.data;
             mp_base += im3 * mask->ne[2] * mask->ne[1] * stride1 + im2 * mask->ne[1] * stride1 + im1 * stride1;
@@ -531,8 +529,8 @@ int op_flash_attn_ext(struct htp_ops_context * octx) {
     size_t mask_row_stride = 0;
     if (mask) {
         size_t mask_row_bytes = mask->ne[0] * sizeof(__fp16);
-        mask_row_stride = hex_round_up(mask_row_bytes, 128);
-        octx->src3_spad.size = mask_row_stride * mask->ne[1] * mask->ne[2] * mask->ne[3];
+        mask_row_stride = mask_row_bytes;
+        octx->src3_spad.size = hex_round_up(mask_row_stride * mask->ne[1] * mask->ne[2] * mask->ne[3], 128);
     } else {
         octx->src3_spad.size = 0;
     }
@@ -555,17 +553,11 @@ int op_flash_attn_ext(struct htp_ops_context * octx) {
         dma_queue * dma = octx->ctx->dma[0];
         uint8_t * dst_base = octx->src3_spad.data;
         const size_t width = mask->ne[0] * sizeof(__fp16);
+        const size_t nrows = mask->ne[1] * mask->ne[2] * mask->ne[3];
 
-        for (uint32_t i3 = 0; i3 < mask->ne[3]; ++i3) {
-            for (uint32_t i2 = 0; i2 < mask->ne[2]; ++i2) {
-                const uint8_t * src_ptr = (const uint8_t *) mask->data + i3 * mask->nb[3] + i2 * mask->nb[2];
-                uint8_t * dst_ptr = dst_base + (i3 * mask->ne[2] + i2) * mask->ne[1] * mask_row_stride;
-
-                while (!dma_queue_push(dma, dma_make_ptr(dst_ptr, src_ptr),
-                                       mask_row_stride, mask->nb[1], width, mask->ne[1])) {
-                    dma_queue_pop(dma);
-                }
-            }
+        while (!dma_queue_push(dma, dma_make_ptr(dst_base, mask->data),
+                               width, mask->nb[1], width, nrows)) {
+            dma_queue_pop(dma);
         }
 
         while (dma->push_idx != dma->pop_idx) {
