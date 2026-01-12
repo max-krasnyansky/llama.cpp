@@ -117,7 +117,7 @@ static inline void hvx_mul_f32_uu(uint8_t * restrict dst, const uint8_t * restri
 
 // Dispatchers
 
-static inline void hvx_add_f32(const uint8_t * restrict src0, const uint8_t * restrict src1, uint8_t * restrict dst, const int num_elems) {
+static inline void hvx_add_f32(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, const int num_elems) {
     if (hex_is_aligned((void *) dst, 128) && hex_is_aligned((void *) src0, 128)) {
         if (hex_is_aligned((void *) src1, 128)) {
             hvx_add_f32_aa(dst, src0, src1, num_elems);
@@ -131,7 +131,7 @@ static inline void hvx_add_f32(const uint8_t * restrict src0, const uint8_t * re
     }
 }
 
-static inline void hvx_sub_f32(const uint8_t * restrict src0, const uint8_t * restrict src1, uint8_t * restrict dst, const int num_elems) {
+static inline void hvx_sub_f32(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, const int num_elems) {
     if (hex_is_aligned((void *) dst, 128) && hex_is_aligned((void *) src0, 128)) {
         if (hex_is_aligned((void *) src1, 128)) {
             hvx_sub_f32_aa(dst, src0, src1, num_elems);
@@ -145,7 +145,7 @@ static inline void hvx_sub_f32(const uint8_t * restrict src0, const uint8_t * re
     }
 }
 
-static inline void hvx_mul_f32(const uint8_t * restrict src0, const uint8_t * restrict src1, uint8_t * restrict dst, const int num_elems) {
+static inline void hvx_mul_f32(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, const int num_elems) {
     if (hex_is_aligned((void *) dst, 128) && hex_is_aligned((void *) src0, 128)) {
         if (hex_is_aligned((void *) src1, 128)) {
             hvx_mul_f32_aa(dst, src0, src1, num_elems);
@@ -161,21 +161,21 @@ static inline void hvx_mul_f32(const uint8_t * restrict src0, const uint8_t * re
 
 // Optimized aliases (assuming alignment)
 
-static inline void hvx_add_f32_opt(const uint8_t * restrict src0, const uint8_t * restrict src1, uint8_t * restrict dst, const int num_elems) {
+static inline void hvx_add_f32_opt(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, const int num_elems) {
     hvx_add_f32_aa(dst, src0, src1, num_elems);
 }
 
-static inline void hvx_sub_f32_opt(const uint8_t * restrict src0, const uint8_t * restrict src1, uint8_t * restrict dst, const int num_elems) {
+static inline void hvx_sub_f32_opt(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, const int num_elems) {
     hvx_sub_f32_aa(dst, src0, src1, num_elems);
 }
 
-static inline void hvx_mul_f32_opt(const uint8_t * restrict src0, const uint8_t * restrict src1, uint8_t * restrict dst, const int num_elems) {
+static inline void hvx_mul_f32_opt(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, const int num_elems) {
     hvx_mul_f32_aa(dst, src0, src1, num_elems);
 }
 
 // Mul-Mul Optimized
 
-static inline void hvx_mul_mul_f32_opt(const uint8_t * restrict src0, const uint8_t * restrict src1, const uint8_t * restrict src2, uint8_t * restrict dst, const int num_elems) {
+static inline void hvx_mul_mul_f32_opt(uint8_t * restrict dst, const uint8_t * restrict src0, const uint8_t * restrict src1, const uint8_t * restrict src2, const int num_elems) {
     assert((unsigned long) dst % 128 == 0);
     assert((unsigned long) src0 % 128 == 0);
     assert((unsigned long) src1 % 128 == 0);
@@ -208,26 +208,10 @@ static inline void hvx_mul_mul_f32_opt(const uint8_t * restrict src0, const uint
 
 // Scalar Operations
 
-static inline void hvx_add_scalar_f32(const uint8_t * restrict src, const float val, uint8_t * restrict dst, const int num_elems) {
-    // For scalar ops, we'll implement a simple unaligned/aligned check or just use UU loop.
-    // To match previous implementation logic which handled alignment more generally, we can use the loop body pattern
-    // treating 'val' as a splatted vector.
-
-    // We can define a scalar loop body or just reuse the logic.
-    // Since we need to support unaligned src/dst, let's use a macro similar to hvx_arith_loop_body but with scalar input.
-
+static inline void hvx_add_scalar_f32(uint8_t * restrict dst, const uint8_t * restrict src, const float val, const int num_elems) {
     const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
     static const float kInf = INFINITY;
     const HVX_Vector inf = hvx_vec_splat_fp32(kInf);
-
-    // Using UU for simplicity and correctness on all alignments,
-    // compiler might optimize if inlined and pointers are known aligned?
-    // But 'src' and 'dst' are passed in.
-
-    // Let's check alignment like the original code did or just use UU if we want to be safe and simple.
-    // The original code had separate loops.
-    // Here I will use UU type logic but check alignment for optimization?
-    // Or just use the macro approach?
 
     // Define a local macro for the scalar operation
     #define SCALAR_OP(v) \
@@ -257,7 +241,7 @@ static inline void hvx_add_scalar_f32(const uint8_t * restrict src, const float 
     #undef SCALAR_OP
 }
 
-static inline void hvx_mul_scalar_f32(const uint8_t * restrict src, const float val, uint8_t * restrict dst, const int num_elems) {
+static inline void hvx_mul_scalar_f32(uint8_t * restrict dst, const uint8_t * restrict src, const float val, const int num_elems) {
     const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
 
     HVX_UVector * restrict vdst = (HVX_UVector *) dst;
@@ -279,7 +263,7 @@ static inline void hvx_mul_scalar_f32(const uint8_t * restrict src, const float 
     }
 }
 
-static inline void hvx_sub_scalar_f32(const uint8_t * restrict src, const float val, uint8_t * restrict dst, const int num_elems) {
+static inline void hvx_sub_scalar_f32(uint8_t * restrict dst, const uint8_t * restrict src, const float val, const int num_elems) {
     const HVX_Vector val_vec = hvx_vec_splat_fp32(val);
 
     HVX_UVector * restrict vdst = (HVX_UVector *) dst;
