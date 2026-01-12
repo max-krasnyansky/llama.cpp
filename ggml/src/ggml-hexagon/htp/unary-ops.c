@@ -122,8 +122,7 @@ static void rms_norm_htp_f32(const float * restrict src,
         if (1 == opt_path) {
             hvx_fast_rms_norm_f32((const uint8_t *) src_local, (uint8_t *) dst_local, spad, row_elems, epsilon);
         } else {
-            float sum;
-            hvx_sum_of_squares_f32(&sum, (const uint8_t *) src_local, row_elems);
+            float sum = hvx_sum_of_squares_f32((const uint8_t *) src_local, row_elems);
 
             const float mean  = sum / row_elems;
             const float scale = 1.0f / sqrtf(mean + epsilon);

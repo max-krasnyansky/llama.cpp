@@ -121,7 +121,7 @@ static inline HVX_Vector hvx_vec_reduce_max2_fp32(HVX_Vector in, HVX_Vector _max
     return _max;
 }
 
-#define hvx_reduce_loop_body(src_type, init_vec, pad_vec, vec_op, reduce_op, scalar_reduce, finalize_op) \
+#define hvx_reduce_loop_body(src_type, init_vec, pad_vec, vec_op, reduce_op, scalar_reduce) \
     do {                                                                                    \
         src_type * restrict vsrc = (src_type *) src;                                        \
         HVX_Vector acc = init_vec;                                                          \
@@ -143,7 +143,7 @@ static inline HVX_Vector hvx_vec_reduce_max2_fp32(HVX_Vector in, HVX_Vector _max
             acc = vec_op(acc, temp);                                                        \
         }                                                                                   \
         HVX_Vector v = reduce_op(acc);                                                      \
-        finalize_op(scalar_reduce(v));                                                      \
+        return scalar_reduce(v);                                                            \
     } while(0)
 
 #define HVX_REDUCE_MAX_OP(acc, val) Q6_Vsf_vmax_VsfVsf(acc, val)
@@ -152,20 +152,17 @@ static inline HVX_Vector hvx_vec_reduce_max2_fp32(HVX_Vector in, HVX_Vector _max
 #define HVX_REDUCE_MAX_SCALAR(v) hvx_vec_get_fp32(v)
 #define HVX_REDUCE_SUM_SCALAR(v) hvx_vec_get_fp32(Q6_Vsf_equals_Vqf32(v))
 
-#define RETURN_RES(x) return x
-#define STORE_RES(x) *dst = x
-
 // Max variants
 
 static inline float hvx_reduce_max_f32_a(const uint8_t * restrict src, const int num_elems) {
     HVX_Vector init_vec = hvx_vec_splat_fp32(((const float *) src)[0]);
     assert((unsigned long) src % 128 == 0);
-    hvx_reduce_loop_body(HVX_Vector, init_vec, init_vec, HVX_REDUCE_MAX_OP, hvx_vec_reduce_max_fp32, HVX_REDUCE_MAX_SCALAR, RETURN_RES);
+    hvx_reduce_loop_body(HVX_Vector, init_vec, init_vec, HVX_REDUCE_MAX_OP, hvx_vec_reduce_max_fp32, HVX_REDUCE_MAX_SCALAR);
 }
 
 static inline float hvx_reduce_max_f32_u(const uint8_t * restrict src, const int num_elems) {
     HVX_Vector init_vec = hvx_vec_splat_fp32(((const float *) src)[0]);
-    hvx_reduce_loop_body(HVX_UVector, init_vec, init_vec, HVX_REDUCE_MAX_OP, hvx_vec_reduce_max_fp32, HVX_REDUCE_MAX_SCALAR, RETURN_RES);
+    hvx_reduce_loop_body(HVX_UVector, init_vec, init_vec, HVX_REDUCE_MAX_OP, hvx_vec_reduce_max_fp32, HVX_REDUCE_MAX_SCALAR);
 }
 
 static inline float hvx_reduce_max_f32(const uint8_t * restrict src, const int num_elems) {
@@ -181,12 +178,12 @@ static inline float hvx_reduce_max_f32(const uint8_t * restrict src, const int n
 static inline float hvx_reduce_sum_f32_a(const uint8_t * restrict src, const int num_elems) {
     HVX_Vector init_vec = Q6_V_vsplat_R(0);
     assert((unsigned long) src % 128 == 0);
-    hvx_reduce_loop_body(HVX_Vector, init_vec, init_vec, HVX_REDUCE_SUM_OP, hvx_vec_qf32_reduce_sum, HVX_REDUCE_SUM_SCALAR, RETURN_RES);
+    hvx_reduce_loop_body(HVX_Vector, init_vec, init_vec, HVX_REDUCE_SUM_OP, hvx_vec_qf32_reduce_sum, HVX_REDUCE_SUM_SCALAR);
 }
 
 static inline float hvx_reduce_sum_f32_u(const uint8_t * restrict src, const int num_elems) {
     HVX_Vector init_vec = Q6_V_vsplat_R(0);
-    hvx_reduce_loop_body(HVX_UVector, init_vec, init_vec, HVX_REDUCE_SUM_OP, hvx_vec_qf32_reduce_sum, HVX_REDUCE_SUM_SCALAR, RETURN_RES);
+    hvx_reduce_loop_body(HVX_UVector, init_vec, init_vec, HVX_REDUCE_SUM_OP, hvx_vec_qf32_reduce_sum, HVX_REDUCE_SUM_SCALAR);
 }
 
 static inline float hvx_reduce_sum_f32(const uint8_t * restrict src, const int num_elems) {
@@ -201,30 +198,28 @@ static inline float hvx_reduce_sum_f32(const uint8_t * restrict src, const int n
 #undef HVX_REDUCE_MAX_OP
 #undef HVX_REDUCE_SUM_OP
 #undef HVX_REDUCE_MAX_SCALAR
-#undef HVX_REDUCE_SUM_SCALAR
-#undef HVX_SUM_SQ_OP
-#undef RETURN_RES
-#undef STORE_RES
-
 // Sum of squares variants
 
-static inline void hvx_sum_of_squares_f32_a(float * restrict dst, const uint8_t * restrict src, const int num_elems) {
+static inline float hvx_sum_of_squares_f32_a(const uint8_t * restrict src, const int num_elems) {
     HVX_Vector init_vec = Q6_V_vsplat_R(0);
-    assert((unsigned long) src % 128 == 0);
-    hvx_reduce_loop_body(HVX_Vector, init_vec, init_vec, HVX_SUM_SQ_OP, hvx_vec_qf32_reduce_sum, HVX_REDUCE_SUM_SCALAR, STORE_RES);
+    assert((uintptr_t) src % 128 == 0);
+    hvx_reduce_loop_body(HVX_Vector, init_vec, init_vec, HVX_SUM_SQ_OP, hvx_vec_qf32_reduce_sum, HVX_REDUCE_SUM_SCALAR);
 }
 
-static inline void hvx_sum_of_squares_f32_u(float * restrict dst, const uint8_t * restrict src, const int num_elems) {
+static inline float hvx_sum_of_squares_f32_u(const uint8_t * restrict src, const int num_elems) {
     HVX_Vector init_vec = Q6_V_vsplat_R(0);
-    hvx_reduce_loop_body(HVX_UVector, init_vec, init_vec, HVX_SUM_SQ_OP, hvx_vec_qf32_reduce_sum, HVX_REDUCE_SUM_SCALAR, STORE_RES);
+    hvx_reduce_loop_body(HVX_UVector, init_vec, init_vec, HVX_SUM_SQ_OP, hvx_vec_qf32_reduce_sum, HVX_REDUCE_SUM_SCALAR);
 }
 
-static inline void hvx_sum_of_squares_f32(float * restrict dst, const uint8_t * restrict src, const int num_elems) {
+static inline float hvx_sum_of_squares_f32(const uint8_t * restrict src, const int num_elems) {
     if (hex_is_aligned((void *) src, 128)) {
-        hvx_sum_of_squares_f32_a(dst, src, num_elems);
+        return hvx_sum_of_squares_f32_a(src, num_elems);
     } else {
-        hvx_sum_of_squares_f32_u(dst, src, num_elems);
+        return hvx_sum_of_squares_f32_u(src, num_elems);
     }
 }
+
+#undef HVX_REDUCE_SUM_SCALAR
+#undef HVX_SUM_SQ_OP
 
 #endif /* HVX_REDUCE_H */
