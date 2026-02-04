@@ -26,54 +26,156 @@ struct htp_argsort_context {
     struct fastdiv_values    div_ne02_ne01;
 };
 
-// Scalar sort implementation since std::sort is not available.
-// Sorts indices based on values.
-static void quicksort_indices_asc(int32_t * indices, const float * data, int left, int right) {
+// Vectorized sort implementation since std::sort is not available.
+// Sorts values and mirrors swaps to indices.
+static void quicksort_values_indices_asc(float * values, int32_t * indices, int left, int right) {
     if (left >= right) return;
 
-    int pivot_idx = indices[(left + right) / 2];
-    float pivot = data[pivot_idx];
+    int pivot_idx = (left + right) / 2;
+    float pivot = values[pivot_idx];
     int i = left;
     int j = right;
 
+    HVX_Vector pivot_vec = hvx_vec_splat_f32(pivot);
+    HVX_Vector one_vec = Q6_V_vsplat_R(1);
+    HVX_Vector zero_vec = Q6_V_vzero();
+
     while (i <= j) {
-        while (data[indices[i]] < pivot) i++;
-        while (data[indices[j]] > pivot) j--;
+        // Vectorized scan for i
+        while (i <= j) {
+            // Check if we have at least one full vector
+            if (i + 32 <= j) {
+                HVX_Vector vals_vec = *(HVX_UVector *)(values + i);
+                HVX_VectorPred pred = Q6_Q_vcmp_gt_VsfVsf(pivot_vec, vals_vec);
+
+                // If all elements are < pivot, we can skip this whole block
+                // To check "all", we count matches.
+                HVX_Vector matches = Q6_V_vmux_QVV(pred, one_vec, zero_vec);
+                HVX_Vector sum = hvx_vec_reduce_sum_i32(matches);
+                if (hvx_vec_get_i32(sum) == 32) {
+                    i += 32;
+                    continue;
+                }
+            }
+
+            // Scalar fallback / cleanup
+            if (values[i] < pivot) {
+                i++;
+            } else {
+                break;
+            }
+        }
+
+        // Vectorized scan for j
+        while (i <= j) {
+            if (j - 32 >= i) {
+                // Load 32 elements ending at j.
+                // Since we want `values[j] > pivot`, let's load from j-31 to j.
+                HVX_Vector vals_vec = *(HVX_UVector *)(values + j - 31);
+                HVX_VectorPred pred = Q6_Q_vcmp_gt_VsfVsf(vals_vec, pivot_vec);
+
+                HVX_Vector matches = Q6_V_vmux_QVV(pred, one_vec, zero_vec);
+                HVX_Vector sum = hvx_vec_reduce_sum_i32(matches);
+                if (hvx_vec_get_i32(sum) == 32) {
+                    j -= 32;
+                    continue;
+                }
+            }
+
+            if (values[j] > pivot) {
+                j--;
+            } else {
+                break;
+            }
+        }
+
         if (i <= j) {
-            int32_t tmp = indices[i];
+            float tmp_val = values[i];
+            values[i] = values[j];
+            values[j] = tmp_val;
+
+            int32_t tmp_idx = indices[i];
             indices[i] = indices[j];
-            indices[j] = tmp;
+            indices[j] = tmp_idx;
             i++;
             j--;
         }
     }
 
-    if (left < j) quicksort_indices_asc(indices, data, left, j);
-    if (i < right) quicksort_indices_asc(indices, data, i, right);
+    if (left < j) quicksort_values_indices_asc(values, indices, left, j);
+    if (i < right) quicksort_values_indices_asc(values, indices, i, right);
 }
 
-static void quicksort_indices_desc(int32_t * indices, const float * data, int left, int right) {
+static void quicksort_values_indices_desc(float * values, int32_t * indices, int left, int right) {
     if (left >= right) return;
 
-    int pivot_idx = indices[(left + right) / 2];
-    float pivot = data[pivot_idx];
+    int pivot_idx = (left + right) / 2;
+    float pivot = values[pivot_idx];
     int i = left;
     int j = right;
 
+    HVX_Vector pivot_vec = hvx_vec_splat_f32(pivot);
+    HVX_Vector one_vec = Q6_V_vsplat_R(1);
+    HVX_Vector zero_vec = Q6_V_vzero();
+
     while (i <= j) {
-        while (data[indices[i]] > pivot) i++;
-        while (data[indices[j]] < pivot) j--;
+        // Vectorized scan for i (values[i] > pivot)
+        while (i <= j) {
+            if (i + 32 <= j) {
+                HVX_Vector vals_vec = *(HVX_UVector *)(values + i);
+                HVX_VectorPred pred = Q6_Q_vcmp_gt_VsfVsf(vals_vec, pivot_vec);
+
+                HVX_Vector matches = Q6_V_vmux_QVV(pred, one_vec, zero_vec);
+                HVX_Vector sum = hvx_vec_reduce_sum_i32(matches);
+                if (hvx_vec_get_i32(sum) == 32) {
+                    i += 32;
+                    continue;
+                }
+            }
+
+            if (values[i] > pivot) {
+                i++;
+            } else {
+                break;
+            }
+        }
+
+        // Vectorized scan for j (values[j] < pivot)
+        while (i <= j) {
+            if (j - 32 >= i) {
+                HVX_Vector vals_vec = *(HVX_UVector *)(values + j - 31);
+                HVX_VectorPred pred = Q6_Q_vcmp_gt_VsfVsf(pivot_vec, vals_vec);
+
+                HVX_Vector matches = Q6_V_vmux_QVV(pred, one_vec, zero_vec);
+                HVX_Vector sum = hvx_vec_reduce_sum_i32(matches);
+                if (hvx_vec_get_i32(sum) == 32) {
+                    j -= 32;
+                    continue;
+                }
+            }
+
+            if (values[j] < pivot) {
+                j--;
+            } else {
+                break;
+            }
+        }
+
         if (i <= j) {
-            int32_t tmp = indices[i];
+            float tmp_val = values[i];
+            values[i] = values[j];
+            values[j] = tmp_val;
+
+            int32_t tmp_idx = indices[i];
             indices[i] = indices[j];
-            indices[j] = tmp;
+            indices[j] = tmp_idx;
             i++;
             j--;
         }
     }
 
-    if (left < j) quicksort_indices_desc(indices, data, left, j);
-    if (i < right) quicksort_indices_desc(indices, data, i, right);
+    if (left < j) quicksort_values_indices_desc(values, indices, left, j);
+    if (i < right) quicksort_values_indices_desc(values, indices, i, right);
 }
 
 static void htp_argsort_f32(unsigned int n, unsigned int i, void * data) {
@@ -149,11 +251,11 @@ static void htp_argsort_f32(unsigned int n, unsigned int i, void * data) {
             indices_buf[j] = j;
         }
 
-        // Sort indices based on values
+        // Sort values and mirror swaps to indices
         if (order == GGML_SORT_ORDER_ASC) {
-            quicksort_indices_asc(indices_buf, values_buf, 0, ne00 - 1);
+            quicksort_values_indices_asc(values_buf, indices_buf, 0, ne00 - 1);
         } else {
-            quicksort_indices_desc(indices_buf, values_buf, 0, ne00 - 1);
+            quicksort_values_indices_desc(values_buf, indices_buf, 0, ne00 - 1);
         }
 
         // Copy indices back to DDR
