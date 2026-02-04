@@ -19,6 +19,8 @@
 struct htp_argsort_context {
     struct htp_ops_context * octx;
     uint32_t                 nrows_per_thread;
+    struct fastdiv_values    div_ne01;
+    struct fastdiv_values    div_ne02_ne01;
 };
 
 // Scalar sort implementation since std::sort is not available.
@@ -122,9 +124,9 @@ static void htp_argsort_f32(unsigned int n, unsigned int i, void * data) {
         // uint32_t i02 = rem / ne01;
         // uint32_t i01 = rem % ne01;
 
-        uint32_t i03 = fastdiv(r, &octx->argsort_div_ne02_ne01);
-        uint32_t rem = r - i03 * octx->argsort_div_ne02_ne01.d;
-        uint32_t i02 = fastdiv(rem, &octx->argsort_div_ne01);
+        uint32_t i03 = fastdiv(r, &actx->div_ne02_ne01);
+        uint32_t rem = r - i03 * actx->div_ne02_ne01.d;
+        uint32_t i02 = fastdiv(rem, &actx->div_ne01);
         uint32_t i01 = rem - i02 * ne01;
 
         uint32_t src_offset = i03 * nb03 + i02 * nb02 + i01 * nb01;
@@ -184,10 +186,6 @@ int op_argsort(struct htp_ops_context * octx) {
     octx->src0_spad.size = total_spad_size;
     octx->src0_spad.size_per_thread = spad_per_thread;
 
-    // Initialize fastdiv values
-    octx->argsort_div_ne01 = init_fastdiv_values(octx->src0.ne[1]);
-    octx->argsort_div_ne02_ne01 = init_fastdiv_values(octx->src0.ne[2] * octx->src0.ne[1]);
-
     FARF(HIGH, "argsort: %ux%ux%ux%u -> %ux%ux%ux%u (0x%x, 0x%x)",
          octx->src0.ne[0], octx->src0.ne[1], octx->src0.ne[2], octx->src0.ne[3],
          octx->dst.ne[0], octx->dst.ne[1], octx->dst.ne[2], octx->dst.ne[3],
@@ -199,6 +197,9 @@ int op_argsort(struct htp_ops_context * octx) {
     struct htp_argsort_context actx;
     actx.octx = octx;
     actx.nrows_per_thread = (total_rows + n_jobs - 1) / n_jobs;
+    // Initialize fastdiv values
+    actx.div_ne01 = init_fastdiv_values(octx->src0.ne[1]);
+    actx.div_ne02_ne01 = init_fastdiv_values(octx->src0.ne[2] * octx->src0.ne[1]);
 
     // Run jobs
     worker_pool_run_func(octx->ctx->worker_pool, htp_argsort_f32, &actx, n_jobs);
