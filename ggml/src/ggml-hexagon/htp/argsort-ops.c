@@ -16,6 +16,11 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #endif
 
+struct htp_argsort_context {
+    struct htp_ops_context * octx;
+    uint32_t                 nrows_per_thread;
+};
+
 // Scalar sort implementation since std::sort is not available.
 // Sorts indices based on values.
 static void quicksort_indices_asc(int32_t * indices, const float * data, int left, int right) {
@@ -67,7 +72,8 @@ static void quicksort_indices_desc(int32_t * indices, const float * data, int le
 }
 
 static void htp_argsort_f32(unsigned int n, unsigned int i, void * data) {
-    struct htp_ops_context * octx = (struct htp_ops_context *)data;
+    struct htp_argsort_context * actx = (struct htp_argsort_context *)data;
+    struct htp_ops_context * octx = actx->octx;
 
     // Unpack context
     const struct htp_tensor * src0 = &octx->src0;
@@ -95,7 +101,7 @@ static void htp_argsort_f32(unsigned int n, unsigned int i, void * data) {
 
     // Rows to process
     uint32_t total_rows = ne01 * ne02 * ne03;
-    uint32_t rows_per_thread = (total_rows + octx->n_threads - 1) / octx->n_threads;
+    uint32_t rows_per_thread = actx->nrows_per_thread;
     uint32_t start_row = rows_per_thread * i;
     uint32_t end_row = MIN(start_row + rows_per_thread, total_rows);
 
@@ -110,11 +116,16 @@ static void htp_argsort_f32(unsigned int n, unsigned int i, void * data) {
     int32_t * indices_buf = (int32_t *) (spad + values_size);
 
     for (uint32_t r = start_row; r < end_row; r++) {
-        // Calculate indices for 3D iteration flattened
-        uint32_t i03 = r / (ne02 * ne01);
-        uint32_t rem = r % (ne02 * ne01);
-        uint32_t i02 = rem / ne01;
-        uint32_t i01 = rem % ne01;
+        // Calculate indices for 3D iteration flattened using fastdiv
+        // uint32_t i03 = r / (ne02 * ne01);
+        // uint32_t rem = r % (ne02 * ne01);
+        // uint32_t i02 = rem / ne01;
+        // uint32_t i01 = rem % ne01;
+
+        uint32_t i03 = fastdiv(r, &octx->argsort_div_ne02_ne01);
+        uint32_t rem = r - i03 * octx->argsort_div_ne02_ne01.d;
+        uint32_t i02 = fastdiv(rem, &octx->argsort_div_ne01);
+        uint32_t i01 = rem - i02 * ne01;
 
         uint32_t src_offset = i03 * nb03 + i02 * nb02 + i01 * nb01;
         uint32_t dst_offset = i03 * nb3 + i02 * nb2 + i01 * nb1;
@@ -173,13 +184,24 @@ int op_argsort(struct htp_ops_context * octx) {
     octx->src0_spad.size = total_spad_size;
     octx->src0_spad.size_per_thread = spad_per_thread;
 
+    // Initialize fastdiv values
+    octx->argsort_div_ne01 = init_fastdiv_values(octx->src0.ne[1]);
+    octx->argsort_div_ne02_ne01 = init_fastdiv_values(octx->src0.ne[2] * octx->src0.ne[1]);
+
     FARF(HIGH, "argsort: %ux%ux%ux%u -> %ux%ux%ux%u (0x%x, 0x%x)",
          octx->src0.ne[0], octx->src0.ne[1], octx->src0.ne[2], octx->src0.ne[3],
          octx->dst.ne[0], octx->dst.ne[1], octx->dst.ne[2], octx->dst.ne[3],
          octx->src0.data, octx->dst.data);
 
+    uint32_t total_rows = octx->src0.ne[1] * octx->src0.ne[2] * octx->src0.ne[3];
+    uint32_t n_jobs = MIN(total_rows, octx->n_threads);
+
+    struct htp_argsort_context actx;
+    actx.octx = octx;
+    actx.nrows_per_thread = (total_rows + n_jobs - 1) / n_jobs;
+
     // Run jobs
-    worker_pool_run_func(octx->ctx->worker_pool, htp_argsort_f32, octx, octx->n_threads);
+    worker_pool_run_func(octx->ctx->worker_pool, htp_argsort_f32, &actx, n_jobs);
 
     return HTP_STATUS_OK;
 }
