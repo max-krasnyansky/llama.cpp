@@ -17,10 +17,28 @@
 #include "htp-msg.h"
 #include "htp-ops.h"
 
+#ifndef MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+
 typedef void (*hvx_elemwise_f32_func)(uint8_t * data_dst, const uint8_t * src0, const uint8_t * src1, const uint32_t num_elems);
 
 static hvx_elemwise_f32_func func_table_HVX[]     = { hvx_mul_f32, hvx_add_f32, hvx_sub_f32, hvx_div_f32 };
 static hvx_elemwise_f32_func func_table_HVX_opt[] = { hvx_mul_f32_aa, hvx_add_f32_aa, hvx_sub_f32_aa, hvx_div_f32_aa };
+
+struct htp_binary_context {
+    struct htp_ops_context * octx;
+    enum htp_op              op;
+    uint32_t                 nrows_per_thread;
+
+    struct fastdiv_values src0_div21; // fastdiv values for ne2 * ne1
+    struct fastdiv_values src0_div1;  // fastdiv values for ne1
+
+    // Broadcasting divisors
+    struct fastdiv_values src1_div3;  // fastdiv values for ne13
+    struct fastdiv_values src1_div2;  // fastdiv values for ne12
+    struct fastdiv_values src1_div1;  // fastdiv values for ne11
+};
 
 #define htp_binary_preamble            \
     const struct htp_tensor * src0 = &octx->src0; \
@@ -58,95 +76,176 @@ static hvx_elemwise_f32_func func_table_HVX_opt[] = { hvx_mul_f32_aa, hvx_add_f3
     const uint32_t nb2 = dst->nb[2];   \
     const uint32_t nb3 = dst->nb[3];   \
                                        \
-    const uint32_t src0_nrows_per_thread = octx->src0_nrows_per_thread;
+    const uint32_t src0_nrows_per_thread = bctx->nrows_per_thread;
 
-static void binary_job_f32_per_thread(struct htp_ops_context * octx,
-                                      uint8_t *                spad_data,
+static void binary_job_f32_per_thread(struct htp_binary_context * bctx,
                                       uint32_t                 nth,
                                       uint32_t                 ith,
-                                      enum htp_op              op) {
+                                      dma_queue *              dma_queue) {
+    struct htp_ops_context * octx = bctx->octx;
     htp_binary_preamble;
 
     const size_t src0_row_size = nb01;
     const size_t src1_row_size = nb11;
     const size_t dst_row_size  = nb1;
 
-    const uint32_t src0_nrows = ne01 * ne02 * ne03;  // src0 rows
-    const uint32_t src1_nrows = ne11 * ne12 * ne13;  // src1 rows
+    const size_t src0_row_size_aligned = hex_round_up(src0_row_size, VLEN);
+    const size_t src1_row_size_aligned = hex_round_up(src1_row_size, VLEN);
+    const size_t dst_row_size_aligned  = hex_round_up(dst_row_size, VLEN);
 
+    const uint32_t src0_nrows = ne01 * ne02 * ne03;
     const uint32_t src0_start_row = src0_nrows_per_thread * ith;
     const uint32_t src0_end_row   = MIN(src0_start_row + src0_nrows_per_thread, src0_nrows);
 
-    // no work for this thread
-    if (src0_start_row >= src0_end_row) {
+    if (src0_start_row >= src0_end_row) return;
+
+    if (nb00 != sizeof(float)) {
+        FARF(ERROR, "binary-f32: src0 inner dim not contiguous");
         return;
     }
 
-    uint64_t t1, t2;
-    t1 = HAP_perf_get_qtimer_count();
+    uint8_t * src0_spad_base = octx->src0_spad.data + (ith * octx->src0_spad.size_per_thread);
+    uint8_t * src1_spad_base = octx->src1_spad.data + (ith * octx->src1_spad.size_per_thread);
+    uint8_t * dst_spad_base  = octx->dst_spad.data + (ith * octx->dst_spad.size_per_thread);
 
-    int is_aligned = 1;
-    int opt_path   = 0;
-    if ((0 == hex_is_aligned((void *) src0->data, VLEN)) || (0 == hex_is_aligned((void *) src1->data, VLEN)) ||
-        (0 == hex_is_aligned((void *) dst->data, VLEN)) || (0 == hex_is_aligned((void *)src0_row_size, VLEN))) {
-        is_aligned = 0;
+    size_t src0_half = octx->src0_spad.size_per_thread / 2;
+    size_t src1_half = octx->src1_spad.size_per_thread / 2;
+    size_t dst_half  = octx->dst_spad.size_per_thread / 2;
+
+    const int BLOCK = src0_half / src0_row_size_aligned;
+    if (BLOCK == 0) {
+        FARF(ERROR, "binary-f32: VTCM too small");
+        return;
     }
-    if ((1 == is_aligned) && !(nb01 & (VLEN - 1))) {
-        opt_path = 1;
-    }
-
-    hvx_elemwise_f32_func func_HVX = (1 == opt_path) ? func_table_HVX_opt[op] : func_table_HVX[op];
-
-    uint8_t * restrict spad_data_th = spad_data + (ith * src0_row_size);
-
-    const uint8_t * restrict src0_ptr = (const uint8_t *) src0->data + (src0_start_row * src0_row_size);
-    uint8_t * restrict dst_ptr        = (uint8_t *) dst->data + (src0_start_row * dst_row_size);
-
-    const uint8_t * restrict data_src1 = (const uint8_t *) src1->data;
 
     const uint32_t ne02_ne01 = ne02 * ne01;
+    const bool broadcast_simple = (ne11 == ne01 && ne12 == ne02 && ne13 == ne03);
+    hvx_elemwise_f32_func func_HVX = func_table_HVX_opt[bctx->op];
 
-    for (uint32_t ir = src0_start_row; ir < src0_end_row; ir++) {
-        const uint32_t i03 = fastdiv(ir, &octx->src0_div21);
-        const uint32_t i02 = fastdiv(ir - i03 * ne02_ne01, &octx->src0_div1);
-        const uint32_t i01 = (ir - i03 * ne02_ne01 - i02 * ne01);
+    for (uint32_t ir = src0_start_row, spad_idx = 0; ir < src0_end_row && spad_idx < 2; ir += BLOCK, spad_idx++) {
+        const uint32_t block_size = MIN(BLOCK, src0_end_row - ir);
 
-        const uint32_t i13 = fastmodulo(i03, ne13, &octx->src1_div3);
-        const uint32_t i12 = fastmodulo(i02, ne12, &octx->src1_div2);
-        const uint32_t i11 = fastmodulo(i01, ne11, &octx->src1_div1);
+        // Fence (pass dst base for this block)
+        dma_queue_push_vtcm_to_ddr(dma_queue,
+            dma_make_ptr(dst->data, dst_spad_base + (spad_idx * dst_half)),
+            dst_row_size, dst_row_size_aligned, 0);
 
-        const uint8_t * restrict src1_ptr = data_src1 + i13 * nb13 + i12 * nb12 + i11 * src1_row_size;
+        for (uint32_t r = 0; r < block_size; r++) {
+            uint32_t curr_ir = ir + r;
+            const uint32_t i03 = fastdiv(curr_ir, &bctx->src0_div21);
+            const uint32_t i02 = fastdiv(curr_ir - i03 * ne02_ne01, &bctx->src0_div1);
+            const uint32_t i01 = (curr_ir - i03 * ne02_ne01 - i02 * ne01);
 
-        if (ir + 1 < src0_end_row) {
-            hex_l2fetch(src0_ptr + ne00, src0_row_size, src0_row_size, 1);
-            if (src1_row_size == src0_row_size) {
-                hex_l2fetch(src1_ptr, src1_row_size, src1_row_size, 1);
-            }
-        }
+            // src0
+            const uint8_t * s0_ptr = (const uint8_t *)src0->data + i03 * nb03 + i02 * nb02 + i01 * nb01;
+            uint8_t * s0_spad = src0_spad_base + (spad_idx * src0_half) + r * src0_row_size_aligned;
+            dma_queue_push_ddr_to_vtcm(dma_queue, dma_make_ptr(s0_spad, s0_ptr), src0_row_size_aligned, src0_row_size, 1);
 
-        const uint32_t nr0 = ne00 / ne10;
-        if (nr0 > 1) {
-            if ((1 == is_aligned) && (nr0 == ne00)) {
-                hvx_splat_f32_a(spad_data_th, *(float *) src1_ptr, nr0);
+            // src1
+            const uint8_t * s1_ptr;
+            if (broadcast_simple) {
+                s1_ptr = (const uint8_t *)src1->data + i03 * nb13 + i02 * nb12 + i01 * nb11;
             } else {
-                for (uint32_t r = 0; r < nr0; r++) {
-                    memcpy(spad_data_th + r * nb11, (const uint8_t *) src1_ptr, nb11);
-                }
+                const uint32_t i13 = fastmodulo(i03, ne13, &bctx->src1_div3);
+                const uint32_t i12 = fastmodulo(i02, ne12, &bctx->src1_div2);
+                const uint32_t i11 = fastmodulo(i01, ne11, &bctx->src1_div1);
+                s1_ptr = (const uint8_t *)src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11;
             }
-            func_HVX((uint8_t *) dst_ptr, (const uint8_t *) src0_ptr, (const uint8_t *) spad_data_th, ne00);
-        } else {
-            func_HVX((uint8_t *) dst_ptr, (const uint8_t *) src0_ptr, (const uint8_t *) src1_ptr, ne00);
-        }
+            uint8_t * s1_spad = src1_spad_base + (spad_idx * src1_half) + r * src1_row_size_aligned;
 
-        src0_ptr += src0_row_size;
-        dst_ptr += dst_row_size;
+            if (ne10 == 1) {
+                // scalar broadcast
+                dma_queue_push_ddr_to_vtcm(dma_queue, dma_make_ptr(s1_spad, s1_ptr), 128, 4, 1);
+            } else {
+                dma_queue_push_ddr_to_vtcm(dma_queue, dma_make_ptr(s1_spad, s1_ptr), src1_row_size_aligned, src1_row_size, 1);
+            }
+        }
     }
 
-    t2 = HAP_perf_get_qtimer_count();
+    for (uint32_t ir = src0_start_row; ir < src0_end_row; ir += BLOCK) {
+        const uint32_t block_size = MIN(BLOCK, src0_end_row - ir);
 
-    FARF(HIGH, "binary-f32 %d/%d/%d: %ux%ux%ux%u (%u:%u) x %ux%ux%ux%u -> %ux%ux%ux%u usec %u\n", ith, nth, opt_path,
-         ne00, ne01, ne02, ne03, src0_start_row, src0_end_row, ne10, ne11, ne12, ne13, ne0, ne1, ne2, ne3,
-         (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
+        float * dst_block_base = (float *) dma_queue_pop(dma_queue).src; // Pop fence
+
+        for (uint32_t r = 0; r < block_size; r++) {
+            dma_ptr s0_dptr = dma_queue_pop(dma_queue);
+            dma_ptr s1_dptr = dma_queue_pop(dma_queue);
+
+            uint8_t * s0_vec = (uint8_t *)s0_dptr.dst;
+            uint8_t * s1_vec = (uint8_t *)s1_dptr.dst;
+            uint8_t * d_vec  = (uint8_t *)dst_block_base + r * dst_row_size_aligned;
+
+            if (ne10 == 1) {
+                hvx_splat_f32_a(d_vec, *(float *)s1_vec, ne00);
+                func_HVX(d_vec, s0_vec, d_vec, ne00);
+            } else {
+                func_HVX(d_vec, s0_vec, s1_vec, ne00);
+            }
+        }
+
+        // Push writeback
+        for (uint32_t r = 0; r < block_size; r++) {
+            uint32_t curr_ir = ir + r;
+            const uint32_t i03 = fastdiv(curr_ir, &bctx->src0_div21);
+            const uint32_t i02 = fastdiv(curr_ir - i03 * ne02_ne01, &bctx->src0_div1);
+            const uint32_t i01 = (curr_ir - i03 * ne02_ne01 - i02 * ne01);
+
+            uint8_t * d_ptr = (uint8_t *)dst->data + i03 * nb3 + i02 * nb2 + i01 * nb1;
+            uint8_t * d_spad = (uint8_t *)dst_block_base + r * dst_row_size_aligned;
+
+            dma_queue_push_vtcm_to_ddr(dma_queue, dma_make_ptr(d_ptr, d_spad), dst_row_size, dst_row_size_aligned, 1);
+        }
+
+        uint32_t pref_ir = ir + 2 * BLOCK;
+        if (pref_ir < src0_end_row) {
+            uint32_t pref_block_size = MIN(BLOCK, src0_end_row - pref_ir);
+            // We need correct spad base. (ir / BLOCK) toggles between even and odd
+            // We need to calculate spad_idx based on pref_ir relative to start
+            uint32_t rel_block_idx = (pref_ir - src0_start_row) / BLOCK;
+            uint32_t spad_idx = rel_block_idx % 2;
+
+            uint8_t * p_src0_base = octx->src0_spad.data + (ith * octx->src0_spad.size_per_thread) + (spad_idx * src0_half);
+            uint8_t * p_src1_base = octx->src1_spad.data + (ith * octx->src1_spad.size_per_thread) + (spad_idx * src1_half);
+            uint8_t * p_dst_base  = octx->dst_spad.data + (ith * octx->dst_spad.size_per_thread) + (spad_idx * dst_half);
+
+            // Fence
+             dma_queue_push_vtcm_to_ddr(dma_queue, dma_make_ptr(dst->data, p_dst_base), dst_row_size, dst_row_size_aligned, 0);
+
+             for (uint32_t r = 0; r < pref_block_size; r++) {
+                 uint32_t curr_ir = pref_ir + r;
+                 const uint32_t i03 = fastdiv(curr_ir, &bctx->src0_div21);
+                 const uint32_t i02 = fastdiv(curr_ir - i03 * ne02_ne01, &bctx->src0_div1);
+                 const uint32_t i01 = (curr_ir - i03 * ne02_ne01 - i02 * ne01);
+
+                 const uint8_t * s0_ptr = (const uint8_t *)src0->data + i03 * nb03 + i02 * nb02 + i01 * nb01;
+                 uint8_t * s0_spad = p_src0_base + r * src0_row_size_aligned;
+                 dma_queue_push_ddr_to_vtcm(dma_queue, dma_make_ptr(s0_spad, s0_ptr), src0_row_size_aligned, src0_row_size, 1);
+
+                 const uint8_t * s1_ptr;
+                 if (broadcast_simple) {
+                     s1_ptr = (const uint8_t *)src1->data + i03 * nb13 + i02 * nb12 + i01 * nb11;
+                 } else {
+                     const uint32_t i13 = fastmodulo(i03, ne13, &bctx->src1_div3);
+                     const uint32_t i12 = fastmodulo(i02, ne12, &bctx->src1_div2);
+                     const uint32_t i11 = fastmodulo(i01, ne11, &bctx->src1_div1);
+                     s1_ptr = (const uint8_t *)src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11;
+                 }
+                 uint8_t * s1_spad = p_src1_base + r * src1_row_size_aligned;
+
+                 if (ne10 == 1) {
+                     dma_queue_push_ddr_to_vtcm(dma_queue, dma_make_ptr(s1_spad, s1_ptr), 128, 4, 1);
+                 } else {
+                     dma_queue_push_ddr_to_vtcm(dma_queue, dma_make_ptr(s1_spad, s1_ptr), src1_row_size_aligned, src1_row_size, 1);
+                 }
+             }
+        }
+    }
+    dma_queue_flush(dma_queue);
+}
+
+static void binary_job_dispatcher_f32_dma(unsigned int n, unsigned int i, void * data) {
+    struct htp_binary_context * bctx = (struct htp_binary_context *) data;
+    binary_job_f32_per_thread(bctx, n, i, bctx->octx->ctx->dma[i]);
 }
 
 static void binary_add_id_job_f32_per_thread(struct htp_ops_context * octx,
@@ -154,7 +253,45 @@ static void binary_add_id_job_f32_per_thread(struct htp_ops_context * octx,
                                              uint32_t                 nth,
                                              uint32_t                 ith,
                                              hvx_elemwise_f32_func    func_HVX) {
-    htp_binary_preamble;
+#define htp_binary_preamble_octx            \
+    const struct htp_tensor * src0 = &octx->src0; \
+    const struct htp_tensor * src1 = &octx->src1; \
+    const struct htp_tensor * src2 = &octx->src2; \
+    struct htp_tensor *       dst  = &octx->dst;  \
+                                       \
+    const uint32_t ne00 = src0->ne[0]; \
+    const uint32_t ne01 = src0->ne[1]; \
+    const uint32_t ne02 = src0->ne[2]; \
+    const uint32_t ne03 = src0->ne[3]; \
+                                       \
+    const uint32_t ne10 = src1->ne[0]; \
+    const uint32_t ne11 = src1->ne[1]; \
+    const uint32_t ne12 = src1->ne[2]; \
+    const uint32_t ne13 = src1->ne[3]; \
+                                       \
+    const uint32_t ne0 = dst->ne[0];   \
+    const uint32_t ne1 = dst->ne[1];   \
+    const uint32_t ne2 = dst->ne[2];   \
+    const uint32_t ne3 = dst->ne[3];   \
+                                       \
+    const uint32_t nb00 = src0->nb[0]; \
+    const uint32_t nb01 = src0->nb[1]; \
+    const uint32_t nb02 = src0->nb[2]; \
+    const uint32_t nb03 = src0->nb[3]; \
+                                       \
+    const uint32_t nb10 = src1->nb[0]; \
+    const uint32_t nb11 = src1->nb[1]; \
+    const uint32_t nb12 = src1->nb[2]; \
+    const uint32_t nb13 = src1->nb[3]; \
+                                       \
+    const uint32_t nb0 = dst->nb[0];   \
+    const uint32_t nb1 = dst->nb[1];   \
+    const uint32_t nb2 = dst->nb[2];   \
+    const uint32_t nb3 = dst->nb[3];   \
+                                       \
+    const uint32_t src0_nrows_per_thread = octx->src0_nrows_per_thread;
+
+    htp_binary_preamble_octx;
 
     const size_t src0_row_size = nb01;
     const size_t src1_row_size = nb11;
@@ -220,22 +357,8 @@ static void binary_add_id_job_f32_per_thread(struct htp_ops_context * octx,
 
 static void binary_job_dispatcher_f32(unsigned int n, unsigned int i, void * data) {
     struct htp_ops_context * octx = (struct htp_ops_context *) data;
-
-    switch (octx->op) {
-        case HTP_OP_MUL:
-        case HTP_OP_ADD:
-        case HTP_OP_SUB:
-        case HTP_OP_DIV:
-            binary_job_f32_per_thread(octx, octx->src1_spad.data, n, i, octx->op);
-            break;
-
-        case HTP_OP_ADD_ID:
-            binary_add_id_job_f32_per_thread(octx, octx->src0_spad.data, n, i, hvx_add_f32);
-            break;
-
-        default:
-            FARF(ERROR, "Unknown Binary Op %u", octx->op);
-            break;
+    if (octx->op == HTP_OP_ADD_ID) {
+         binary_add_id_job_f32_per_thread(octx, octx->src0_spad.data, n, i, hvx_add_f32);
     }
 }
 
@@ -246,33 +369,29 @@ static int execute_op_binary_f32(struct htp_ops_context * octx) {
     const struct htp_tensor * src1 = &octx->src1;
     struct htp_tensor *       dst  = &octx->dst;
 
-    worker_callback_t binary_op_func;
     const char *      op_type = NULL;
+    bool is_add_id = false;
 
     switch (octx->op) {
         case HTP_OP_MUL:
-            binary_op_func = binary_job_dispatcher_f32;
             op_type        = "mul-f32";
             break;
 
         case HTP_OP_ADD:
-            binary_op_func = binary_job_dispatcher_f32;
             op_type        = "add-f32";
             break;
 
         case HTP_OP_SUB:
-            binary_op_func = binary_job_dispatcher_f32;
             op_type        = "sub-f32";
             break;
 
         case HTP_OP_DIV:
-            binary_op_func = binary_job_dispatcher_f32;
             op_type        = "div-f32";
             break;
 
         case HTP_OP_ADD_ID:
-            binary_op_func = binary_job_dispatcher_f32;
             op_type        = "add-id-f32";
+            is_add_id      = true;
             break;
 
         default:
@@ -287,46 +406,80 @@ static int execute_op_binary_f32(struct htp_ops_context * octx) {
     const size_t src1_row_size = src1->nb[1];
     const size_t dst_row_size  = dst->nb[1];
 
-    // VTCM scratchpads for all tensors
-    octx->dst_spad.size  = hex_round_up(dst_row_size, 128) * n_threads;
-    octx->src0_spad.size = hex_round_up(src0_row_size, 128) * n_threads;
-    octx->src1_spad.size = hex_round_up(src1_row_size, 128) * n_threads;
+    const size_t src0_row_size_aligned = hex_round_up(src0_row_size, VLEN);
+    const size_t src1_row_size_aligned = hex_round_up(src1_row_size, VLEN);
+    const size_t dst_row_size_aligned  = hex_round_up(dst_row_size, VLEN);
 
-    size_t spad_size = octx->src0_spad.size + octx->src1_spad.size + octx->dst_spad.size;
+    if (is_add_id) {
+        // Old logic for ADD_ID
+        // VTCM scratchpads for all tensors
+        octx->dst_spad.size  = hex_round_up(dst_row_size, 128) * n_threads;
+        octx->src0_spad.size = hex_round_up(src0_row_size, 128) * n_threads;
+        octx->src1_spad.size = hex_round_up(src1_row_size, 128) * n_threads;
 
-    FARF(HIGH,
-         "%s: (%ux%ux%ux%u) * (%ux%ux%ux%u) -> (%ux%ux%ux%u) : src0-spad-size %u src1-spad-size %u dst-spad-size %u\n",
-         op_type, src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3], src1->ne[0], src1->ne[1], src1->ne[2],
-         src1->ne[3], dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3], octx->src0_spad.size, octx->src1_spad.size,
-         octx->dst_spad.size);
+        size_t spad_size = octx->src0_spad.size + octx->src1_spad.size + octx->dst_spad.size;
 
-    // Make sure the reserved vtcm size is sufficient
-    if (octx->ctx->vtcm_size < spad_size) {
-        FARF(ERROR, "binary-%s : current VTCM reservation %zu is too small, needed %zu\n", op_type,
-             octx->ctx->vtcm_size, spad_size);
-        return HTP_STATUS_VTCM_TOO_SMALL;
-    }
+        if (octx->ctx->vtcm_size < spad_size) {
+            return HTP_STATUS_VTCM_TOO_SMALL;
+        }
 
-    octx->src0_spad.data = octx->ctx->vtcm_base;
-    octx->src1_spad.data = octx->src0_spad.data + octx->src0_spad.size;
-    octx->dst_spad.data  = octx->src1_spad.data + octx->src1_spad.size;
+        octx->src0_spad.data = octx->ctx->vtcm_base;
+        octx->src1_spad.data = octx->src0_spad.data + octx->src0_spad.size;
+        octx->dst_spad.data  = octx->src1_spad.data + octx->src1_spad.size;
 
-    if (!(octx->flags & HTP_OPFLAGS_SKIP_COMPUTE)) {
-        uint32_t n_jobs = MIN(n_threads, src0_nrows);
+        if (!(octx->flags & HTP_OPFLAGS_SKIP_COMPUTE)) {
+            uint32_t n_jobs = MIN(n_threads, src0_nrows);
+            octx->src0_nrows_per_thread = (src0_nrows + n_jobs - 1) / n_jobs;
 
-        octx->src0_nrows_per_thread = (src0_nrows + n_jobs - 1) / n_jobs;
+            octx->src0_div21 = init_fastdiv_values(src0->ne[2] * src0->ne[1]);
+            octx->src0_div3  = init_fastdiv_values(src0->ne[3]);
+            octx->src0_div2  = init_fastdiv_values(src0->ne[2]);
+            octx->src0_div1  = init_fastdiv_values(src0->ne[1]);
 
-        octx->src0_div21 = init_fastdiv_values(src0->ne[2] * src0->ne[1]);
-        octx->src0_div3  = init_fastdiv_values(src0->ne[3]);
-        octx->src0_div2  = init_fastdiv_values(src0->ne[2]);
-        octx->src0_div1  = init_fastdiv_values(src0->ne[1]);
+            worker_pool_run_func(octx->ctx->worker_pool, binary_job_dispatcher_f32, octx, n_jobs);
+        }
+    } else {
+        // New DMA logic
+        size_t vtcm_per_thread = octx->ctx->vtcm_size / n_threads;
 
-        octx->src1_div21 = init_fastdiv_values(src1->ne[2] * src1->ne[1]);
-        octx->src1_div3  = init_fastdiv_values(src1->ne[3]);
-        octx->src1_div2  = init_fastdiv_values(src1->ne[2]);
-        octx->src1_div1  = init_fastdiv_values(src1->ne[1]);
+        // Align to 128
+        vtcm_per_thread = (vtcm_per_thread / 128) * 128;
 
-        worker_pool_run_func(octx->ctx->worker_pool, binary_op_func, octx, n_jobs);
+        // Partition vtcm_per_thread into 3 parts (src0, src1, dst)
+        size_t part_size = (vtcm_per_thread / 3 / 128) * 128;
+
+        octx->src0_spad.size_per_thread = part_size;
+        octx->src1_spad.size_per_thread = part_size;
+        octx->dst_spad.size_per_thread  = part_size;
+
+        octx->src0_spad.data = octx->ctx->vtcm_base;
+        octx->src1_spad.data = octx->src0_spad.data + n_threads * part_size;
+        octx->dst_spad.data  = octx->src1_spad.data + n_threads * part_size;
+
+        octx->src0_spad.size = n_threads * part_size;
+
+        if (part_size < 2 * src0_row_size_aligned) {
+             FARF(ERROR, "binary-f32: VTCM too small for DMA path");
+             return HTP_STATUS_VTCM_TOO_SMALL;
+        }
+
+        if (!(octx->flags & HTP_OPFLAGS_SKIP_COMPUTE)) {
+            uint32_t n_jobs = MIN(n_threads, src0_nrows);
+
+            struct htp_binary_context bctx;
+            bctx.octx = octx;
+            bctx.op = octx->op;
+            bctx.nrows_per_thread = (src0_nrows + n_jobs - 1) / n_jobs;
+
+            bctx.src0_div21 = init_fastdiv_values(src0->ne[2] * src0->ne[1]);
+            bctx.src0_div1  = init_fastdiv_values(src0->ne[1]);
+
+            bctx.src1_div3  = init_fastdiv_values(src1->ne[3]);
+            bctx.src1_div2  = init_fastdiv_values(src1->ne[2]);
+            bctx.src1_div1  = init_fastdiv_values(src1->ne[1]);
+
+            worker_pool_run_func(octx->ctx->worker_pool, binary_job_dispatcher_f32_dma, &bctx, n_jobs);
+        }
     }
 
     return err;
