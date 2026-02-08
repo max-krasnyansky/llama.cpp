@@ -141,7 +141,7 @@ static void binary_job_f32_scalar_per_thread(struct htp_binary_context * bctx,
         uint8_t * s0_spad = src0_spad_base + spad_idx * src0_spad_half;
         uint8_t * d_spad  = dst_spad_base  + spad_idx * dst_spad_half;
 
-        // Dummy push for sync (Output slot)
+        // Dummy push for sync (Output slot). We reuse d_spad here.
         dma_queue_push_vtcm_to_ddr(q, dma_make_ptr(dst_curr, d_spad), nb1, dst_row_size_aligned, 0);
 
         // Push Input (src0 only)
@@ -152,17 +152,14 @@ static void binary_job_f32_scalar_per_thread(struct htp_binary_context * bctx,
     }
 
     // Main loop
-    spad_idx = 0;
     for (uint32_t ir = start_row; ir < end_row; ) {
         uint32_t current_block_size = calc_block_size(bctx, ir, end_row,
                                                       ne01, ne02, BLOCK_MAX);
 
-        // Pop Output Status
-        dma_queue_pop(q);
-        // Pop Input (src0)
-        void * src0_ptr = dma_queue_pop(q).dst;
-
-        uint8_t * d_spad = dst_spad_base + spad_idx * dst_spad_half;
+        // Pop Output Status and reuse pointer (VTCM buffer for dst)
+        uint8_t * d_spad = (uint8_t *) dma_queue_pop(q).src;
+        // Pop Input (src0) and reuse pointer (VTCM buffer for src0)
+        uint8_t * s0_spad = (uint8_t *) dma_queue_pop(q).dst;
 
         // Calculate src1 base address for this block
         uint32_t i03, i02, i01, rem;
@@ -180,7 +177,7 @@ static void binary_job_f32_scalar_per_thread(struct htp_binary_context * bctx,
 
         // Compute
         for (uint32_t r = 0; r < current_block_size; r++) {
-            uint8_t * r_src0 = (uint8_t *)src0_ptr + r * src0_row_size_aligned;
+            uint8_t * r_src0 = s0_spad + r * src0_row_size_aligned;
             uint8_t * r_dst  = d_spad + r * dst_row_size_aligned;
 
             float val = *(float *)src1_ptr;
@@ -195,7 +192,7 @@ static void binary_job_f32_scalar_per_thread(struct htp_binary_context * bctx,
             }
         }
 
-        // Push Output
+        // Push Output using reused pointer d_spad
         uint8_t * dst_curr = (uint8_t *)dst->data + i03 * nb3 + i02 * nb2 + i01 * nb1;
         dma_queue_push(q, dma_make_ptr(dst_curr, d_spad), nb1, dst_row_size_aligned, ne00 * sizeof(float), current_block_size);
 
@@ -211,14 +208,13 @@ static void binary_job_f32_scalar_per_thread(struct htp_binary_context * bctx,
              p01 = prem - p02 * ne01;
 
              uint8_t * s0_next = (uint8_t *)src0->data + p03 * nb03 + p02 * nb02 + p01 * nb01;
-             uint8_t * s0_spad = src0_spad_base + spad_idx * src0_spad_half;
 
+             // Push Input using reused pointer s0_spad
              dma_queue_push(q, dma_make_ptr(s0_spad, s0_next), src0_row_size_aligned, nb01, ne00 * sizeof(float), next_block_size);
              ir_prefetch += next_block_size;
         }
 
         ir += current_block_size;
-        spad_idx ^= 1;
     }
 
     dma_queue_flush(q);
@@ -309,23 +305,20 @@ static void binary_job_f32_vector_per_thread(struct htp_binary_context * bctx,
     }
 
     // Main loop
-    spad_idx = 0;
     for (uint32_t ir = start_row; ir < end_row; ) {
         uint32_t current_block_size = calc_block_size(bctx, ir, end_row,
                                                       ne01, ne02, BLOCK_MAX);
 
-        // Pop Output Status
-        dma_queue_pop(q);
-        // Pop Inputs
-        void * src0_ptr = dma_queue_pop(q).dst;
-        void * src1_ptr = dma_queue_pop(q).dst;
-
-        uint8_t * d_spad = dst_spad_base + spad_idx * dst_spad_half;
+        // Pop Output Status and reuse pointer (d_spad)
+        uint8_t * d_spad = (uint8_t *) dma_queue_pop(q).src;
+        // Pop Inputs and reuse pointers (s0_spad, s1_spad)
+        uint8_t * s0_spad = (uint8_t *) dma_queue_pop(q).dst;
+        uint8_t * s1_spad = (uint8_t *) dma_queue_pop(q).dst;
 
         // Compute
         for (uint32_t r = 0; r < current_block_size; r++) {
-            uint8_t * r_src0 = (uint8_t *)src0_ptr + r * src0_row_size_aligned;
-            uint8_t * r_src1 = (uint8_t *)src1_ptr + r * src1_row_size_aligned;
+            uint8_t * r_src0 = s0_spad + r * src0_row_size_aligned;
+            uint8_t * r_src1 = s1_spad + r * src1_row_size_aligned;
             uint8_t * r_dst  = d_spad + r * dst_row_size_aligned;
 
             switch (octx->op) {
@@ -366,9 +359,6 @@ static void binary_job_f32_vector_per_thread(struct htp_binary_context * bctx,
              uint8_t * s1_next = (uint8_t *)src1->data + p13 * nb13 + p12 * nb12 + p11 * nb11;
              uint32_t s1_stride = (ne11 == 1) ? 0 : nb11;
 
-             uint8_t * s0_spad = src0_spad_base + spad_idx * src0_spad_half;
-             uint8_t * s1_spad = src1_spad_base + spad_idx * src1_spad_half;
-
              dma_queue_push(q, dma_make_ptr(s0_spad, s0_next), src0_row_size_aligned, nb01, ne00 * sizeof(float), next_block_size);
              dma_queue_push(q, dma_make_ptr(s1_spad, s1_next), src1_row_size_aligned, s1_stride, ne00 * sizeof(float), next_block_size);
 
@@ -376,7 +366,6 @@ static void binary_job_f32_vector_per_thread(struct htp_binary_context * bctx,
         }
 
         ir += current_block_size;
-        spad_idx ^= 1;
     }
 
     dma_queue_flush(q);
