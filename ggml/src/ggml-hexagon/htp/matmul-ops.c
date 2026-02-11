@@ -735,8 +735,9 @@ static void vec_dot_f16_f32_uu_1x1(const int n, float * restrict s, const void *
 
 // *** matmul with support for 4d tensors and full broadcasting
 
-static void matmul_4d(struct htp_matmul_context * mmctx, uint32_t nth, uint32_t ith) {
-    struct htp_ops_context * octx = mmctx->octx;
+static void matmul_4d(unsigned int nth, unsigned int ith, void * data) {
+    struct htp_matmul_context * mmctx = data;
+    struct htp_ops_context *    octx  = mmctx->octx;
     htp_matmul_preamble;
 
     uint64_t t1, t2;
@@ -816,8 +817,9 @@ static void matmul_4d(struct htp_matmul_context * mmctx, uint32_t nth, uint32_t 
 }
 
 // src1 tensor is already in VTCM spad
-static void matmul_2d(struct htp_matmul_context * mmctx, uint32_t nth, uint32_t ith) {
-    struct htp_ops_context * octx = mmctx->octx;
+static void matmul_2d(unsigned int nth, unsigned int ith, void * data) {
+    struct htp_matmul_context * mmctx = data;
+    struct htp_ops_context *    octx  = mmctx->octx;
     htp_matmul_preamble;
 
     const uint32_t src0_nrows = ne01 * ne02 * ne03;  // src0 rows
@@ -907,8 +909,9 @@ static void matmul_2d(struct htp_matmul_context * mmctx, uint32_t nth, uint32_t 
 }
 
 // q8x4x2 src1 tensor is already in VTCM spad
-static void matvec_2d(struct htp_matmul_context * mmctx, uint32_t nth, uint32_t ith) {
-    struct htp_ops_context * octx = mmctx->octx;
+static void matvec_2d(unsigned int nth, unsigned int ith, void * data) {
+    struct htp_matmul_context * mmctx = data;
+    struct htp_ops_context *    octx  = mmctx->octx;
     htp_matmul_preamble;
 
     const uint32_t src0_nrows = ne01;
@@ -998,8 +1001,9 @@ struct mmid_row_mapping {
 };
 
 // src1 tensor is already in VTCM spad
-static void matmul_id(struct htp_matmul_context * mmctx, uint32_t nth, uint32_t ith) {
-    struct htp_ops_context * octx = mmctx->octx;
+static void matmul_id(unsigned int nth, unsigned int ith, void * data) {
+    struct htp_matmul_context * mmctx = data;
+    struct htp_ops_context *    octx  = mmctx->octx;
     htp_matmul_preamble;
 
     struct htp_tensor * restrict     ids = &octx->src2;
@@ -1120,8 +1124,9 @@ static void matmul_id(struct htp_matmul_context * mmctx, uint32_t nth, uint32_t 
 }
 
 // src1 tensor is already in VTCM spad
-static void matvec_id(struct htp_matmul_context * mmctx, uint32_t nth, uint32_t ith) {
-    struct htp_ops_context * octx = mmctx->octx;
+static void matvec_id(unsigned int nth, unsigned int ith, void * data) {
+    struct htp_matmul_context * mmctx = data;
+    struct htp_ops_context *    octx  = mmctx->octx;
     htp_matmul_preamble;
 
     struct htp_tensor * restrict     ids = &octx->src2;
@@ -1537,33 +1542,6 @@ static void htp_quantize_f16_f16(unsigned int n, unsigned int i, void * data) {
 
 // ** matmul/matvec callbacks for worker_pool
 
-static void htp_matvec_job(unsigned int n, unsigned int i, void * data) {
-    struct htp_matmul_context * mmctx = data;
-    matvec_2d(mmctx, n, i);
-}
-
-static void htp_matmul_job(unsigned int n, unsigned int i, void * data) {
-    struct htp_matmul_context * mmctx = data;
-    matmul_2d(mmctx, n, i);
-}
-
-static void htp_matmul_4d_job(unsigned int n, unsigned int i, void * data) {
-    struct htp_matmul_context * mmctx = data;
-    matmul_4d(mmctx, n, i);
-}
-
-// ** matmul-id callbacks for worker_pool
-
-static void htp_matvec_id_job(unsigned int n, unsigned int i, void * data) {
-    struct htp_matmul_context * mmctx = data;
-    matvec_id(mmctx, n, i);
-}
-
-static void htp_matmul_id_job(unsigned int n, unsigned int i, void * data) {
-    struct htp_matmul_context * mmctx = data;
-    matmul_id(mmctx, n, i);
-}
-
 // ** main matmul entry point
 
 static inline bool htp_is_permuted(const struct htp_tensor * t) {
@@ -1604,9 +1582,9 @@ int op_matmul(struct htp_ops_context * octx) {
             mmctx.vec_dot_2x2 = vec_dot_q4x4x2_q8x4x2_2x2;
 
             if (src1_nrows > 1) {
-                matmul_job_func = htp_matmul_job;
+                matmul_job_func = matmul_2d;
             } else {
-                matmul_job_func = htp_matvec_job;
+                matmul_job_func = matvec_2d;
             }
 
             src1_row_size = q8x4x2_row_size(ne10);  // row size post quantization
@@ -1638,9 +1616,9 @@ int op_matmul(struct htp_ops_context * octx) {
             mmctx.vec_dot_2x2 = vec_dot_q8x4x2_q8x4x2_2x2;
 
             if (src1_nrows > 1) {
-                matmul_job_func = htp_matmul_job;
+                matmul_job_func = matmul_2d;
             } else {
-                matmul_job_func = htp_matvec_job;
+                matmul_job_func = matvec_2d;
             }
 
             src1_row_size = q8x4x2_row_size(ne10);  // row size post quantization
@@ -1672,9 +1650,9 @@ int op_matmul(struct htp_ops_context * octx) {
             mmctx.vec_dot_2x2 = vec_dot_mxfp4x4x2_q8x4x2_2x2;
 
             if (src1_nrows > 1) {
-                matmul_job_func = htp_matmul_job;
+                matmul_job_func = matmul_2d;
             } else {
-                matmul_job_func = htp_matvec_job;
+                matmul_job_func = matvec_2d;
             }
 
             src1_row_size = q8x4x2_row_size(ne10);  // row size post quantization
@@ -1723,9 +1701,9 @@ int op_matmul(struct htp_ops_context * octx) {
                     mmctx.vec_dot_2x2 = vec_dot_f16_f16_aa_2x2;
 
                     if (src1_nrows > 1) {
-                        matmul_job_func = htp_matmul_job;
+                        matmul_job_func = matmul_2d;
                     } else {
-                        matmul_job_func = htp_matvec_job;
+                        matmul_job_func = matvec_2d;
                     }
 
                     src1_row_size = f16_src1_row_size; // row size post quantization
@@ -1743,12 +1721,12 @@ int op_matmul(struct htp_ops_context * octx) {
                     if (src1->type == HTP_TYPE_F32) {
                         op_type           = "f16-f32";
                         mmctx.type        = op_type;
-                        matmul_job_func   = htp_matmul_4d_job;
+                        matmul_job_func   = matmul_4d;
                         mmctx.vec_dot_1x1 = vec_dot_f16_f32_uu_1x1;
                     } else {
                         op_type           = "f16-f16";
                         mmctx.type        = op_type;
-                        matmul_job_func   = htp_matmul_4d_job;
+                        matmul_job_func   = matmul_4d;
                         mmctx.vec_dot_1x1 = vec_dot_f16_f16_uu_1x1;
                         mmctx.vec_dot_2x1 = vec_dot_f16_f16_uu_2x1;
                         mmctx.vec_dot_2x2 = vec_dot_f16_f16_uu_2x2;
@@ -1867,9 +1845,9 @@ int op_matmul_id(struct htp_ops_context * octx) {
 
             src1_row_size = q8x4x2_row_size(ne10);  // row size post quantization
             if (src1_nrows > 1) {
-                matmul_id_job_func = htp_matmul_id_job;
+                matmul_id_job_func = matmul_id;
             } else {
-                matmul_id_job_func = htp_matvec_id_job;
+                matmul_id_job_func = matvec_id;
             }
 
             // Entire src1 tensor is placed into the VTCM
@@ -1901,9 +1879,9 @@ int op_matmul_id(struct htp_ops_context * octx) {
 
             src1_row_size = q8x4x2_row_size(ne10);  // row size post quantization
             if (src1_nrows > 1) {
-                matmul_id_job_func = htp_matmul_id_job;
+                matmul_id_job_func = matmul_id;
             } else {
-                matmul_id_job_func = htp_matvec_id_job;
+                matmul_id_job_func = matvec_id;
             }
 
             // Entire src1 tensor is placed into the VTCM
@@ -1935,9 +1913,9 @@ int op_matmul_id(struct htp_ops_context * octx) {
 
             src1_row_size = q8x4x2_row_size(ne10);  // row size post quantization
             if (src1_nrows > 1) {
-                matmul_id_job_func = htp_matmul_id_job;
+                matmul_id_job_func = matmul_id;
             } else {
-                matmul_id_job_func = htp_matvec_id_job;
+                matmul_id_job_func = matvec_id;
             }
 
             // Entire src1 tensor is placed into the VTCM
