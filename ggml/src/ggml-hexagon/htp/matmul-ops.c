@@ -305,6 +305,13 @@ static inline HVX_Vector hvx_vec_rmpy_x8_full(HVX_Vector_x8 x, HVX_Vector_x8 y) 
 }
 
 // Handle most common cases of tensors not multiple of 1024.
+static inline HVX_Vector hvx_vec_rmpy_x8_nloe(HVX_Vector_x8 x, HVX_Vector_x8 y, unsigned int n) {
+    if (n <= 256) { return hvx_vec_rmpy_x8_n(x, y, 256); };
+    if (n <= 512) { return hvx_vec_rmpy_x8_n(x, y, 512); };
+    if (n <= 768) { return hvx_vec_rmpy_x8_n(x, y, 768); };
+    return hvx_vec_rmpy_x8_n(x, y, 1024);
+}
+
 // Helper inline functions for computation
 
 static inline HVX_Vector load_d_shuff(const uint8_t * ptr) {
@@ -357,7 +364,7 @@ static inline HVX_Vector compute_q4_q8_nloe(HVX_Vector_x8 r_q, HVX_Vector_x8 y_q
 }
 
 static inline HVX_Vector compute_mxfp4_q8_nloe(HVX_Vector_x8 r_q, HVX_Vector_x8 y_q, HVX_Vector r_d, HVX_Vector y_d, int32_t nloe) {
-    HVX_Vector r_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(r_q, y_q));
+    HVX_Vector r_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_nloe(r_q, y_q, nloe));
 
     HVX_Vector half = Q6_Vh_vsplat_R(0x3800);
     y_d             = Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(Q6_Vh_vshuff_Vh(y_d), half));
