@@ -344,6 +344,62 @@ static void binary_job_vector_row_broadcast(unsigned int nth, unsigned int ith, 
 
     void * s1_ptr = (void *) src1_spad;
 
+    // Optimized path: if no splits are required (contiguous src0/dst), we can avoid index calculations
+    if (!bctx->split_at_ne01 && !bctx->split_at_ne02) {
+        // Initial pointer calculation
+        uint32_t i03, i02, i01, rem;
+        i03 = fastdiv(ir_prefetch, &bctx->dim12_div);
+        rem = ir_prefetch - i03 * (ne02 * ne01);
+        i02 = fastdiv(rem, &bctx->dim1_div);
+        i01 = rem - i02 * ne01;
+
+        uint8_t * src0_pf_curr = (uint8_t *)src0->data + i03 * nb03 + i02 * nb02 + i01 * nb01;
+        uint8_t * dst_pf_curr  = (uint8_t *)dst->data  + i03 * nb3  + i02 * nb2  + i01 * nb1;
+        uint8_t * dst_wb_curr  = dst_pf_curr;
+
+        for (int k = 0; k < 2 && ir_prefetch < end_row; k++) {
+            uint32_t current_block_size = MIN(bctx->block_max, end_row - ir_prefetch);
+
+            uint8_t * s0_spad = src0_spad_base + spad_idx * src0_spad_half;
+            uint8_t * d_spad  = dst_spad_base  + spad_idx * dst_spad_half;
+
+            dma_queue_push_vtcm_to_ddr(q, dma_make_ptr(dst_pf_curr, d_spad), nb1, bctx->dst_row_size_aligned, 0);
+            dma_queue_push(q, dma_make_ptr(s0_spad, src0_pf_curr), bctx->src0_row_size_aligned, nb01, ne00 * sizeof(float), current_block_size);
+
+            src0_pf_curr += current_block_size * nb01;
+            dst_pf_curr  += current_block_size * nb1;
+            ir_prefetch += current_block_size;
+            spad_idx ^= 1;
+        }
+
+        for (uint32_t ir = start_row; ir < end_row; ) {
+            uint32_t current_block_size = MIN(bctx->block_max, end_row - ir);
+
+            uint8_t * d_spad = (uint8_t *) dma_queue_pop(q).src;
+            uint8_t * s0_spad = (uint8_t *) dma_queue_pop(q).dst;
+
+            for (uint32_t r = 0; r < current_block_size; r++) {
+                uint8_t * r_src0 = s0_spad + r * bctx->src0_row_size_aligned;
+                uint8_t * r_src1 = (uint8_t *)s1_ptr; // Constant
+                uint8_t * r_dst  = d_spad + r * bctx->dst_row_size_aligned;
+                COMPUTE_VECTOR_OP_AAA(r_dst, r_src0, r_src1, ne00);
+            }
+
+            dma_queue_push(q, dma_make_ptr(dst_wb_curr, d_spad), nb1, bctx->dst_row_size_aligned, ne00 * sizeof(float), current_block_size);
+            dst_wb_curr += current_block_size * nb1;
+
+            if (ir_prefetch < end_row) {
+                 uint32_t next_block_size = MIN(bctx->block_max, end_row - ir_prefetch);
+                 dma_queue_push(q, dma_make_ptr(s0_spad, src0_pf_curr), bctx->src0_row_size_aligned, nb01, ne00 * sizeof(float), next_block_size);
+                 src0_pf_curr += next_block_size * nb01;
+                 ir_prefetch += next_block_size;
+            }
+            ir += current_block_size;
+        }
+        dma_queue_flush(q);
+        return;
+    }
+
     for (int k = 0; k < 2 && ir_prefetch < end_row; k++) {
         uint32_t current_block_size = calc_block_size(bctx, ir_prefetch, end_row, ne01, ne02);
         uint32_t i03, i02, i01, rem;
