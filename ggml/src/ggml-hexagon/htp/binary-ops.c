@@ -342,9 +342,7 @@ static void binary_job_vector_row_broadcast(unsigned int nth, unsigned int ith, 
     uint32_t ir_prefetch = start_row;
     int spad_idx = 0;
 
-    // Fetch src1 once
-    dma_queue_push(q, dma_make_ptr(src1_spad, (const void *) src1->data), bctx->src1_row_size_aligned, 0, ne00 * sizeof(float), 1);
-    void * s1_ptr = dma_queue_pop(q).dst;
+    void * s1_ptr = (void *) src1_spad;
 
     for (int k = 0; k < 2 && ir_prefetch < end_row; k++) {
         uint32_t current_block_size = calc_block_size(bctx, ir_prefetch, end_row, ne01, ne02);
@@ -723,8 +721,8 @@ static int execute_op_binary_f32(struct htp_ops_context * octx) {
     // Adjust for static src1 in row_bcast case
     if (is_row_bcast) {
         size_t needed_static = src1_row_size_aligned;
-        if (octx->ctx->vtcm_size < needed_static * n_threads) return HTP_STATUS_VTCM_TOO_SMALL;
-        size_t avail = octx->ctx->vtcm_size - needed_static * n_threads;
+        if (octx->ctx->vtcm_size < needed_static) return HTP_STATUS_VTCM_TOO_SMALL;
+        size_t avail = octx->ctx->vtcm_size - needed_static;
         rows_per_buffer = avail / (n_threads * spad_row_total);
     }
 
@@ -739,13 +737,17 @@ static int execute_op_binary_f32(struct htp_ops_context * octx) {
     if (is_scalar || use_complex || use_repeat || is_add_id) {
         octx->src1_spad.size_per_thread = 0;
     } else if (is_row_bcast) {
-        octx->src1_spad.size_per_thread = src1_row_size_aligned;
+        octx->src1_spad.size_per_thread = 0;
     } else {
         octx->src1_spad.size_per_thread = rows_per_buffer * 2 * src1_row_size_aligned;
     }
 
     octx->src0_spad.size = n_threads * octx->src0_spad.size_per_thread;
-    octx->src1_spad.size = n_threads * octx->src1_spad.size_per_thread;
+    if (is_row_bcast) {
+        octx->src1_spad.size = src1_row_size_aligned;
+    } else {
+        octx->src1_spad.size = n_threads * octx->src1_spad.size_per_thread;
+    }
     octx->dst_spad.size  = n_threads * octx->dst_spad.size_per_thread;
 
     if (octx->ctx->vtcm_size < (octx->src0_spad.size + octx->src1_spad.size + octx->dst_spad.size)) {
@@ -755,6 +757,12 @@ static int execute_op_binary_f32(struct htp_ops_context * octx) {
     octx->src0_spad.data = octx->ctx->vtcm_base;
     octx->src1_spad.data = octx->src0_spad.data + octx->src0_spad.size;
     octx->dst_spad.data  = octx->src1_spad.data + octx->src1_spad.size;
+
+    if (is_row_bcast) {
+        dma_queue * q = octx->ctx->dma[0];
+        dma_queue_push(q, dma_make_ptr(octx->src1_spad.data, (const void *) src1->data), src1_row_size_aligned, 0, src1->ne[0] * sizeof(float), 1);
+        dma_queue_pop(q);
+    }
 
     if (!(octx->flags & HTP_OPFLAGS_SKIP_COMPUTE)) {
         uint32_t n_jobs = MIN(n_threads, src0_nrows);
