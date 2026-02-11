@@ -322,7 +322,7 @@ static inline HVX_Vector load_d_direct(const uint8_t * ptr) {
     return *(const HVX_UVector *) ptr;
 }
 
-static inline HVX_Vector compute_q4_q8_block(HVX_Vector_x8 r_q, HVX_Vector_x8 y_q, HVX_Vector r_d, HVX_Vector y_d) {
+static inline HVX_Vector compute_qx_q8_block(HVX_Vector_x8 r_q, HVX_Vector_x8 y_q, HVX_Vector r_d, HVX_Vector y_d) {
     HVX_Vector r_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(r_q, y_q));
     HVX_Vector r_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r_d, y_d)));
     return Q6_Vqf32_vmpy_VsfVsf(r_ia, r_dd);
@@ -351,7 +351,7 @@ static inline HVX_Vector compute_mxfp4_q8_block(HVX_Vector_x8 r_q, HVX_Vector_x8
     return Q6_Vqf32_vmpy_VsfVsf(r_ia, r_dd);
 }
 
-static inline HVX_Vector compute_q4_q8_nloe(HVX_Vector_x8 r_q, HVX_Vector_x8 y_q, HVX_Vector r_d, HVX_Vector y_d, int32_t nloe) {
+static inline HVX_Vector compute_qx_q8_nloe(HVX_Vector_x8 r_q, HVX_Vector_x8 y_q, HVX_Vector r_d, HVX_Vector y_d, int32_t nloe) {
     HVX_Vector r_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_nloe(r_q, y_q, nloe));
     HVX_Vector r_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r_d, y_d)));
 
@@ -396,7 +396,7 @@ static inline HVX_Vector compute_mxfp4_q8_nloe(HVX_Vector_x8 r_q, HVX_Vector_x8 
     const uint8_t * restrict y_q = ((const uint8_t *) vy + 0); \
     const uint8_t * restrict y_d = ((const uint8_t *) vy + y_qrow_size);
 
-#define DEFINE_VEC_DOT_Q4_Q8_VARIANTS(NAME, QK, X_DBLK, X_QBLK, X_QROW_SHIFT, Y_DBLK, Y_QBLK, LOAD_X_Q, LOAD_X_D, LOAD_Y_D, COMPUTE_BLOCK, COMPUTE_NLOE) \
+#define DEFINE_VEC_DOT_Qx_Q8_VARIANTS(NAME, QK, X_DBLK, X_QBLK, X_QROW_SHIFT, Y_DBLK, Y_QBLK, LOAD_X_Q, LOAD_X_D, LOAD_Y_D, COMPUTE_BLOCK, COMPUTE_NLOE) \
 static void vec_dot_##NAME##_1x1(const int n, float * restrict s, const void * restrict vx, const void * restrict vy) { \
     const uint32_t x_qrow_size = n >> X_QROW_SHIFT; \
     VEC_DOT_COMMON_SETUP(QK, 0) \
@@ -518,9 +518,9 @@ static void vec_dot_##NAME##_2x2(const int n, float * restrict s, const void * r
     hvx_vec_store_u(&s[2], 8, r1_sum); \
 }
 
-DEFINE_VEC_DOT_Q4_Q8_VARIANTS(q4x4x2_q8x4x2,    (QK_Q4_0x4x2 * 4),   (8 * 4 * 2), (QK_Q4_0x4x2 * 4) / 2, 1, (8 * 4 * 2), (QK_Q4_0x4x2 * 4), hvx_vec_load_q4x4x8,   load_d_shuff,  load_d_shuff,  compute_q4_q8_block,    compute_q4_q8_nloe)
-DEFINE_VEC_DOT_Q4_Q8_VARIANTS(q8x4x2_q8x4x2,    (QK_Q4_0x4x2 * 4),   (8 * 4 * 2), (QK_Q4_0x4x2 * 4),     0, (8 * 4 * 2), (QK_Q4_0x4x2 * 4), hvx_vec_load_q8x4x8,   load_d_shuff,  load_d_shuff,  compute_q4_q8_block,    compute_q4_q8_nloe)
-DEFINE_VEC_DOT_Q4_Q8_VARIANTS(mxfp4x4x2_q8x4x2, (QK_MXFP4x4x2 * 4),  (8 * 4 * 1), (QK_MXFP4x4x2 * 4) / 2,1, (8 * 4 * 2), (QK_MXFP4x4x2 * 4),hvx_vec_load_mxfp4x4x8,load_d_direct, load_d_direct, compute_mxfp4_q8_block, compute_mxfp4_q8_nloe)
+DEFINE_VEC_DOT_Qx_Q8_VARIANTS(q4x4x2_q8x4x2,    (QK_Q4_0x4x2 * 4),   (8 * 4 * 2), (QK_Q4_0x4x2 * 4) / 2, 1, (8 * 4 * 2), (QK_Q4_0x4x2 * 4), hvx_vec_load_q4x4x8,   load_d_shuff,  load_d_shuff,  compute_qx_q8_block,    compute_qx_q8_nloe)
+DEFINE_VEC_DOT_Qx_Q8_VARIANTS(q8x4x2_q8x4x2,    (QK_Q8_0x4x2 * 4),   (8 * 4 * 2), (QK_Q8_0x4x2 * 4),     0, (8 * 4 * 2), (QK_Q8_0x4x2 * 4), hvx_vec_load_q8x4x8,   load_d_shuff,  load_d_shuff,  compute_qx_q8_block,    compute_qx_q8_nloe)
+DEFINE_VEC_DOT_Qx_Q8_VARIANTS(mxfp4x4x2_q8x4x2, (QK_MXFP4x4x2 * 4),  (8 * 4 * 1), (QK_MXFP4x4x2 * 4) / 2,1, (8 * 4 * 2), (QK_MXFP4x4x2 * 4),hvx_vec_load_mxfp4x4x8,load_d_direct, load_d_direct, compute_mxfp4_q8_block, compute_mxfp4_q8_nloe)
 
 // F16 functions
 static void vec_dot_f16_f16_aa_1x1(const int n, float * restrict s, const void * restrict vx, const void * restrict vy) {
