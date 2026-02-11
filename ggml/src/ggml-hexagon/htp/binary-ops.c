@@ -135,7 +135,8 @@ static uint32_t calc_block_size(struct htp_binary_context * bctx, uint32_t ir, u
     }
 
 // 1. Scalar src1 (ne10 == 1)
-static void binary_job_scalar(struct htp_binary_context * bctx, uint32_t nth, uint32_t ith) {
+static void binary_job_scalar(unsigned int nth, unsigned int ith, void * data) {
+    struct htp_binary_context * bctx = (struct htp_binary_context *) data;
     struct htp_ops_context * octx = bctx->octx;
     htp_binary_preamble;
 
@@ -215,11 +216,6 @@ static void binary_job_scalar(struct htp_binary_context * bctx, uint32_t nth, ui
              p01 = prem - p02 * ne01;
              uint8_t * s0_next = (uint8_t *)src0->data + p03 * nb03 + p02 * nb02 + p01 * nb01;
 
-             // Reuse pointers: s0_spad logic handled by dma_queue
-             // We need to determine WHICH buffer to use.
-             // We reused the buffer pointer from the POP.
-             // So s0_spad IS the buffer we want to fill for the next-next iteration.
-             // Correct.
              dma_queue_push(q, dma_make_ptr(s0_spad, s0_next), bctx->src0_row_size_aligned, nb01, ne00 * sizeof(float), next_block_size);
              ir_prefetch += next_block_size;
         }
@@ -229,7 +225,8 @@ static void binary_job_scalar(struct htp_binary_context * bctx, uint32_t nth, ui
 }
 
 // 2. Vector Same Shape (ne1x == ne0x) or Simple Broadcast
-static void binary_job_vector_same_shape(struct htp_binary_context * bctx, uint32_t nth, uint32_t ith) {
+static void binary_job_vector_same_shape(unsigned int nth, unsigned int ith, void * data) {
+    struct htp_binary_context * bctx = (struct htp_binary_context *) data;
     struct htp_ops_context * octx = bctx->octx;
     htp_binary_preamble;
 
@@ -324,7 +321,8 @@ static void binary_job_vector_same_shape(struct htp_binary_context * bctx, uint3
 }
 
 // 3. Row Broadcast (ne11 == 1, ne12 == 1, single row src1)
-static void binary_job_vector_row_broadcast(struct htp_binary_context * bctx, uint32_t nth, uint32_t ith) {
+static void binary_job_vector_row_broadcast(unsigned int nth, unsigned int ith, void * data) {
+    struct htp_binary_context * bctx = (struct htp_binary_context *) data;
     struct htp_ops_context * octx = bctx->octx;
     htp_binary_preamble;
 
@@ -406,7 +404,8 @@ static void binary_job_vector_row_broadcast(struct htp_binary_context * bctx, ui
 }
 
 // 4. Vector Complex (ne10 == ne00, complex broadcast)
-static void binary_job_vector_complex(struct htp_binary_context * bctx, uint32_t nth, uint32_t ith) {
+static void binary_job_vector_complex(unsigned int nth, unsigned int ith, void * data) {
+    struct htp_binary_context * bctx = (struct htp_binary_context *) data;
     struct htp_ops_context * octx = bctx->octx;
     htp_binary_preamble;
 
@@ -489,7 +488,8 @@ static void binary_job_vector_complex(struct htp_binary_context * bctx, uint32_t
 }
 
 // 5. Element Repeat (ne10 != ne00)
-static void binary_job_element_repeat(struct htp_binary_context * bctx, uint32_t nth, uint32_t ith) {
+static void binary_job_element_repeat(unsigned int nth, unsigned int ith, void * data) {
+    struct htp_binary_context * bctx = (struct htp_binary_context *) data;
     struct htp_ops_context * octx = bctx->octx;
     htp_binary_preamble;
 
@@ -575,6 +575,115 @@ static void binary_job_element_repeat(struct htp_binary_context * bctx, uint32_t
     dma_queue_flush(q);
 }
 
+// 6. ADD_ID (src1 gathered via src2 indices)
+static void binary_job_add_id(unsigned int nth, unsigned int ith, void * data) {
+    struct htp_binary_context * bctx = (struct htp_binary_context *) data;
+    struct htp_ops_context * octx = bctx->octx;
+    // Preamble logic manual since macro assumes src1/src0/dst
+    // Here we have src0, src2(indices), src1(table), dst
+    const struct htp_tensor * src0 = &octx->src0;
+    const struct htp_tensor * src1 = &octx->src1;
+    const struct htp_tensor * src2 = &octx->src2;
+    struct htp_tensor *       dst  = &octx->dst;
+
+    const uint32_t ne00 = src0->ne[0];
+    const uint32_t ne01 = src0->ne[1];
+    const uint32_t ne02 = src0->ne[2];
+    const uint32_t ne03 = src0->ne[3];
+    const uint32_t ne11 = src1->ne[1]; // for bounds check
+
+    const uint32_t nb01 = src0->nb[1];
+    const uint32_t nb02 = src0->nb[2];
+    const uint32_t nb03 = src0->nb[3];
+    const uint32_t nb11 = src1->nb[1]; // src1 row stride
+    const uint32_t nb1 = dst->nb[1];
+    const uint32_t nb2 = dst->nb[2];
+    const uint32_t nb3 = dst->nb[3];
+
+    const uint32_t total_rows = ne01 * ne02 * ne03;
+    const uint32_t start_row = bctx->nrows_per_thread * ith;
+    const uint32_t end_row   = MIN(start_row + bctx->nrows_per_thread, total_rows);
+    if (start_row >= end_row) return;
+
+    uint8_t * src0_spad_base = octx->src0_spad.data + (ith * octx->src0_spad.size_per_thread);
+    uint8_t * dst_spad_base  = octx->dst_spad.data  + (ith * octx->dst_spad.size_per_thread);
+    size_t src0_spad_half = octx->src0_spad.size_per_thread / 2;
+    size_t dst_spad_half  = octx->dst_spad.size_per_thread  / 2;
+
+    dma_queue * q = octx->ctx->dma[ith];
+    uint32_t ir_prefetch = start_row;
+    int spad_idx = 0;
+
+    for (int k = 0; k < 2 && ir_prefetch < end_row; k++) {
+        uint32_t current_block_size = calc_block_size(bctx, ir_prefetch, end_row, ne01, ne02);
+        uint32_t i03, i02, i01, rem;
+        i03 = fastdiv(ir_prefetch, &bctx->dim12_div);
+        rem = ir_prefetch - i03 * (ne02 * ne01);
+        i02 = fastdiv(rem, &bctx->dim1_div);
+        i01 = rem - i02 * ne01;
+
+        uint8_t * src0_curr = (uint8_t *)src0->data + i03 * nb03 + i02 * nb02 + i01 * nb01;
+        uint8_t * dst_curr  = (uint8_t *)dst->data  + i03 * nb3  + i02 * nb2  + i01 * nb1;
+
+        uint8_t * s0_spad = src0_spad_base + spad_idx * src0_spad_half;
+        uint8_t * d_spad  = dst_spad_base  + spad_idx * dst_spad_half;
+
+        dma_queue_push_vtcm_to_ddr(q, dma_make_ptr(dst_curr, d_spad), nb1, bctx->dst_row_size_aligned, 0);
+        dma_queue_push(q, dma_make_ptr(s0_spad, src0_curr), bctx->src0_row_size_aligned, nb01, ne00 * sizeof(float), current_block_size);
+        ir_prefetch += current_block_size;
+        spad_idx ^= 1;
+    }
+
+    for (uint32_t ir = start_row; ir < end_row; ) {
+        uint32_t current_block_size = calc_block_size(bctx, ir, end_row, ne01, ne02);
+        uint8_t * d_spad = (uint8_t *) dma_queue_pop(q).src;
+        uint8_t * s0_spad = (uint8_t *) dma_queue_pop(q).dst;
+
+        uint32_t i03, i02, i01, rem;
+        i03 = fastdiv(ir, &bctx->dim12_div);
+        rem = ir - i03 * (ne02 * ne01);
+        i02 = fastdiv(rem, &bctx->dim1_div);
+        i01 = rem - i02 * ne01;
+
+        for (uint32_t r = 0; r < current_block_size; r++) {
+            uint32_t r_i01 = i01 + r; // linear within block since we split at ne01
+
+            // Read index from src2 (indices)
+            // src2 is [ne01, ne02], effectively 2D map.
+            // Address = src2->data + i01 * nb20 + i02 * nb21 + ...
+            // Original code: src2->data + i01 * src2->nb[0] + i02 * src2->nb[1]
+            // We need src2 strides. octx->src2 is available.
+            const int32_t idx = *(int32_t *)((char *)src2->data + r_i01 * src2->nb[0] + i02 * src2->nb[1]);
+
+            // Calc src1 ptr
+            uint8_t * r_src1 = (uint8_t *)src1->data + idx * nb11;
+
+            uint8_t * r_src0 = s0_spad + r * bctx->src0_row_size_aligned;
+            uint8_t * r_dst  = d_spad + r * bctx->dst_row_size_aligned;
+
+            // Use AAU (Aligned dst/src0, Unaligned src1) add
+            hvx_add_f32_aau(r_dst, r_src0, r_src1, ne00);
+        }
+
+        uint8_t * dst_curr = (uint8_t *)dst->data + i03 * nb3 + i02 * nb2 + i01 * nb1;
+        dma_queue_push(q, dma_make_ptr(dst_curr, d_spad), nb1, bctx->dst_row_size_aligned, ne00 * sizeof(float), current_block_size);
+
+        if (ir_prefetch < end_row) {
+             uint32_t next_block_size = calc_block_size(bctx, ir_prefetch, end_row, ne01, ne02);
+             uint32_t p03, p02, p01, prem;
+             p03 = fastdiv(ir_prefetch, &bctx->dim12_div);
+             prem = ir_prefetch - p03 * (ne02 * ne01);
+             p02 = fastdiv(prem, &bctx->dim1_div);
+             p01 = prem - p02 * ne01;
+             uint8_t * s0_next = (uint8_t *)src0->data + p03 * nb03 + p02 * nb02 + p01 * nb01;
+             dma_queue_push(q, dma_make_ptr(s0_spad, s0_next), bctx->src0_row_size_aligned, nb01, ne00 * sizeof(float), next_block_size);
+             ir_prefetch += next_block_size;
+        }
+        ir += current_block_size;
+    }
+    dma_queue_flush(q);
+}
+
 static int execute_op_binary_f32(struct htp_ops_context * octx) {
     int err = HTP_STATUS_OK;
     const struct htp_tensor * src0 = &octx->src0;
@@ -586,7 +695,7 @@ static int execute_op_binary_f32(struct htp_ops_context * octx) {
 
     // Use packed row sizes for VTCM allocation
     const size_t src0_row_size = src0->ne[0] * sizeof(float);
-    const size_t src1_row_size = src1->ne[0] * sizeof(float); // Only valid if ne10==ne00, else we handle separately
+    const size_t src1_row_size = src1->ne[0] * sizeof(float);
     const size_t dst_row_size  = dst->ne[0] * sizeof(float);
 
     // Align to VLEN
@@ -594,34 +703,35 @@ static int execute_op_binary_f32(struct htp_ops_context * octx) {
     const size_t dst_row_size_aligned  = hex_round_up(dst_row_size, VLEN);
     size_t src1_row_size_aligned = hex_round_up(src1_row_size, VLEN);
 
-    bool is_scalar = (src1->ne[0] == 1);
+    bool is_add_id = (octx->op == HTP_OP_ADD_ID);
+    bool is_scalar = !is_add_id && (src1->ne[0] == 1);
 
     // Determine which kernel we will use to alloc memory and dispatch
-    bool use_vector_same = !is_scalar && src1->ne[0] == src0->ne[0] &&
+    bool use_vector_same = !is_add_id && !is_scalar && src1->ne[0] == src0->ne[0] &&
                (src1->ne[1] == src0->ne[1] || src1->ne[1] == 1) &&
                (src1->ne[2] == src0->ne[2] || src1->ne[2] == 1) &&
                (src1->ne[3] == src0->ne[3] || src1->ne[3] == 1);
 
     bool is_row_bcast = use_vector_same && (src1->ne[1] == 1 && src1->ne[2] == 1 && src1->ne[3] == 1);
-    bool use_complex = !is_scalar && !use_vector_same && (src1->ne[0] == src0->ne[0]);
-    bool use_repeat  = !is_scalar && !use_vector_same && (src1->ne[0] != src0->ne[0]);
+    bool use_complex = !is_add_id && !is_scalar && !use_vector_same && (src1->ne[0] == src0->ne[0]);
+    bool use_repeat  = !is_add_id && !is_scalar && !use_vector_same && (src1->ne[0] != src0->ne[0]);
 
     size_t spad_row_total;
     if (is_scalar) {
         spad_row_total = 2 * (src0_row_size_aligned + dst_row_size_aligned);
     } else if (is_row_bcast) {
-        spad_row_total = 2 * (src0_row_size_aligned + dst_row_size_aligned); // src1 allocated separately
+        spad_row_total = 2 * (src0_row_size_aligned + dst_row_size_aligned);
     } else if (use_vector_same) {
         spad_row_total = 2 * (src0_row_size_aligned + src1_row_size_aligned + dst_row_size_aligned);
+    } else if (is_add_id) {
+        spad_row_total = 2 * (src0_row_size_aligned + dst_row_size_aligned); // src1 read directly
     } else {
-        // complex/repeat: we don't DMA src1 (or minimal)
         spad_row_total = 2 * (src0_row_size_aligned + dst_row_size_aligned);
     }
 
     size_t rows_per_buffer = octx->ctx->vtcm_size / (n_threads * spad_row_total);
     // Adjust for static src1 in row_bcast case
     if (is_row_bcast) {
-        // Reduce slightly to fit static row
         size_t needed_static = src1_row_size_aligned;
         if (octx->ctx->vtcm_size < needed_static * n_threads) return HTP_STATUS_VTCM_TOO_SMALL;
         size_t avail = octx->ctx->vtcm_size - needed_static * n_threads;
@@ -636,10 +746,10 @@ static int execute_op_binary_f32(struct htp_ops_context * octx) {
     octx->src0_spad.size_per_thread = rows_per_buffer * 2 * src0_row_size_aligned;
     octx->dst_spad.size_per_thread  = rows_per_buffer * 2 * dst_row_size_aligned;
 
-    if (is_scalar || use_complex || use_repeat) {
+    if (is_scalar || use_complex || use_repeat || is_add_id) {
         octx->src1_spad.size_per_thread = 0;
     } else if (is_row_bcast) {
-        octx->src1_spad.size_per_thread = src1_row_size_aligned; // 1 row
+        octx->src1_spad.size_per_thread = src1_row_size_aligned;
     } else {
         octx->src1_spad.size_per_thread = rows_per_buffer * 2 * src1_row_size_aligned;
     }
@@ -690,11 +800,12 @@ static int execute_op_binary_f32(struct htp_ops_context * octx) {
         // Precompute specific kernel parameters
         if (use_vector_same) {
             bctx.src1_dma_stride = (src1->ne[1] == 1) ? 0 : src1->nb[1];
-            bctx.src1_fetch_rows = (src1->ne[1] == 1) ? 1 : rows_per_buffer; // Will be clamped by loop
+            bctx.src1_fetch_rows = (src1->ne[1] == 1) ? 1 : rows_per_buffer;
         }
 
         worker_callback_t worker_func;
-        if (is_scalar) worker_func = binary_job_scalar;
+        if (is_add_id) worker_func = binary_job_add_id;
+        else if (is_scalar) worker_func = binary_job_scalar;
         else if (is_row_bcast) worker_func = binary_job_vector_row_broadcast;
         else if (use_vector_same) worker_func = binary_job_vector_same_shape;
         else if (use_complex) worker_func = binary_job_vector_complex;
