@@ -97,13 +97,23 @@ static uint32_t calc_block_size(struct htp_binary_context * bctx, uint32_t ir, u
         default: break; \
     }
 
-// Macro for vector op switch
-#define COMPUTE_VECTOR_OP(DST, SRC0, SRC1, N) \
+// Macro for vector op switch (All Aligned)
+#define COMPUTE_VECTOR_OP_AAA(DST, SRC0, SRC1, N) \
     switch (octx->op) { \
-        case HTP_OP_ADD: hvx_add_f32_aa(DST, SRC0, SRC1, N); break; \
-        case HTP_OP_SUB: hvx_sub_f32_aa(DST, SRC0, SRC1, N); break; \
-        case HTP_OP_MUL: hvx_mul_f32_aa(DST, SRC0, SRC1, N); break; \
-        case HTP_OP_DIV: hvx_div_f32_aa(DST, SRC0, SRC1, N); break; \
+        case HTP_OP_ADD: hvx_add_f32_aaa(DST, SRC0, SRC1, N); break; \
+        case HTP_OP_SUB: hvx_sub_f32_aaa(DST, SRC0, SRC1, N); break; \
+        case HTP_OP_MUL: hvx_mul_f32_aaa(DST, SRC0, SRC1, N); break; \
+        case HTP_OP_DIV: hvx_div_f32_aaa(DST, SRC0, SRC1, N); break; \
+        default: break; \
+    }
+
+// Macro for vector op switch (Dst Aligned, Src0 Aligned, Src1 Unaligned)
+#define COMPUTE_VECTOR_OP_AAU(DST, SRC0, SRC1, N) \
+    switch (octx->op) { \
+        case HTP_OP_ADD: hvx_add_f32_aau(DST, SRC0, SRC1, N); break; \
+        case HTP_OP_SUB: hvx_sub_f32_aau(DST, SRC0, SRC1, N); break; \
+        case HTP_OP_MUL: hvx_mul_f32_aau(DST, SRC0, SRC1, N); break; \
+        case HTP_OP_DIV: hvx_div_f32_aau(DST, SRC0, SRC1, N); break; \
         default: break; \
     }
 
@@ -259,7 +269,7 @@ static void binary_job_vector_same_shape(struct htp_binary_context * bctx, uint3
             uint8_t * r_src0 = s0_spad + r * src0_row_size_aligned;
             uint8_t * r_src1 = s1_spad + r * src1_row_size_aligned;
             uint8_t * r_dst  = d_spad + r * dst_row_size_aligned;
-            COMPUTE_VECTOR_OP(r_dst, r_src0, r_src1, ne00);
+            COMPUTE_VECTOR_OP_AAA(r_dst, r_src0, r_src1, ne00);
         }
 
         uint32_t i03, i02, i01, rem;
@@ -349,7 +359,7 @@ static void binary_job_vector_row_broadcast(struct htp_binary_context * bctx, ui
             uint8_t * r_src0 = s0_spad + r * src0_row_size_aligned;
             uint8_t * r_src1 = (uint8_t *)s1_ptr; // Constant
             uint8_t * r_dst  = d_spad + r * dst_row_size_aligned;
-            COMPUTE_VECTOR_OP(r_dst, r_src0, r_src1, ne00);
+            COMPUTE_VECTOR_OP_AAA(r_dst, r_src0, r_src1, ne00);
         }
 
         uint32_t i03, i02, i01, rem;
@@ -441,7 +451,7 @@ static void binary_job_vector_complex(struct htp_binary_context * bctx, uint32_t
             uint8_t * r_dst  = d_spad + r * dst_row_size_aligned;
 
             // Read src1 from DDR (unaligned)
-            COMPUTE_VECTOR_OP(r_dst, r_src0, r_src1, ne00);
+            COMPUTE_VECTOR_OP_AAU(r_dst, r_src0, r_src1, ne00);
         }
 
         uint8_t * dst_curr = (uint8_t *)dst->data + i03 * nb3 + i02 * nb2 + i01 * nb1;
@@ -532,7 +542,19 @@ static void binary_job_element_repeat(struct htp_binary_context * bctx, uint32_t
             for (uint32_t c = 0; c < ne00; c += ne10) {
                 // Determine length: ne10 or remaining
                 uint32_t len = MIN(ne10, ne00 - c);
-                COMPUTE_VECTOR_OP(r_dst + c * sizeof(float), r_src0 + c * sizeof(float), r_src1_row, len);
+                // r_dst and r_src0 are aligned to 128 at start.
+                // c * 4 offset might make them unaligned if c is not multiple of 32.
+                // ne10 (src1 width) might not be multiple of 32.
+                // So subsequent iterations might have unaligned dst/src0.
+                // We should use generic hvx_op here or AAU/UUU variants if we knew alignments.
+                // Simplest is to call generic dispatcher hvx_op(dst, src0, src1, len).
+                switch (octx->op) { \
+                    case HTP_OP_ADD: hvx_add_f32(r_dst + c * sizeof(float), r_src0 + c * sizeof(float), r_src1_row, len); break; \
+                    case HTP_OP_SUB: hvx_sub_f32(r_dst + c * sizeof(float), r_src0 + c * sizeof(float), r_src1_row, len); break; \
+                    case HTP_OP_MUL: hvx_mul_f32(r_dst + c * sizeof(float), r_src0 + c * sizeof(float), r_src1_row, len); break; \
+                    case HTP_OP_DIV: hvx_div_f32(r_dst + c * sizeof(float), r_src0 + c * sizeof(float), r_src1_row, len); break; \
+                    default: break; \
+                }
             }
         }
 
