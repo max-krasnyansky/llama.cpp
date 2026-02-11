@@ -524,10 +524,72 @@ DEFINE_VEC_DOT_Qx_Q8_VARIANTS(mxfp4x4x2_q8x4x2, (QK_MXFP4x4x2 * 4),  (8 * 4 * 1)
 
 // F16 functions
 static void vec_dot_f16_f16_aa_1x1(const int n, float * restrict s, const void * restrict vx, const void * restrict vy) {
-    vec_dot_f16_f16_aa(n, s, vx, vy);
+    const HVX_Vector * restrict x = (const HVX_Vector *) vx;
+    const HVX_Vector * restrict y = (const HVX_Vector *) vy;
+
+    uint32_t nvec = n / VLEN_FP16; // num full fp16 hvx vectors
+    uint32_t nloe = n % VLEN_FP16; // leftover elements
+
+    HVX_Vector rsum = Q6_V_vsplat_R(0);
+
+    uint32_t i = 0;
+
+    #pragma unroll(4)
+    for (i = 0; i < nvec; i++) {
+        HVX_VectorPair xy_qf = Q6_Wqf32_vmpy_VhfVhf(x[i], y[i]);
+        rsum = Q6_Vqf32_vadd_Vqf32Vqf32(rsum, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy_qf),  Q6_V_hi_W(xy_qf)));
+    }
+
+    if (nloe) {
+        HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe * 2);
+        HVX_Vector x_hf = Q6_V_vand_QV(bmask, x[i]);
+        HVX_Vector y_hf = Q6_V_vand_QV(bmask, y[i]);
+
+        HVX_VectorPair xy_qf = Q6_Wqf32_vmpy_VhfVhf(x_hf, y_hf);
+        rsum = Q6_Vqf32_vadd_Vqf32Vqf32(rsum, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy_qf),  Q6_V_hi_W(xy_qf)));
+    }
+
+    rsum = hvx_vec_reduce_sum_f32(Q6_Vsf_equals_Vqf32(rsum));
+    hvx_vec_store_u(&s[0], 4, rsum);
 }
 static void vec_dot_f16_f16_aa_2x1(const int n, float * restrict s, const void * restrict vx, uint32_t vx_row_size, const void * restrict vy) {
-    vec_dot_f16_f16_aa_rx2(n, s, vx, vx_row_size, vy);
+    const HVX_Vector * restrict x0 = (const HVX_Vector *) vx;
+    const HVX_Vector * restrict x1 = (const HVX_Vector *) ((const uint8_t *) vx + vx_row_size);
+    const HVX_Vector * restrict y  = (const HVX_Vector *) vy;
+
+    uint32_t nvec = n / VLEN_FP16;
+    uint32_t nloe = n % VLEN_FP16;
+
+    HVX_Vector rsum0 = Q6_V_vsplat_R(0);
+    HVX_Vector rsum1 = Q6_V_vsplat_R(0);
+
+    uint32_t i = 0;
+
+    #pragma unroll(2)
+    for (i = 0; i < nvec; i++) {
+        HVX_Vector y_hf = y[i];
+        HVX_VectorPair xy0_qf = Q6_Wqf32_vmpy_VhfVhf(x0[i], y_hf);
+        HVX_VectorPair xy1_qf = Q6_Wqf32_vmpy_VhfVhf(x1[i], y_hf);
+
+        rsum0 = Q6_Vqf32_vadd_Vqf32Vqf32(rsum0, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy0_qf), Q6_V_hi_W(xy0_qf)));
+        rsum1 = Q6_Vqf32_vadd_Vqf32Vqf32(rsum1, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy1_qf), Q6_V_hi_W(xy1_qf)));
+    }
+
+    if (nloe) {
+        HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe * 2);
+        HVX_Vector x0_hf = Q6_V_vand_QV(bmask, x0[i]);
+        HVX_Vector x1_hf = Q6_V_vand_QV(bmask, x1[i]);
+        HVX_Vector y_hf  = Q6_V_vand_QV(bmask, y[i]);
+
+        HVX_VectorPair xy0_qf = Q6_Wqf32_vmpy_VhfVhf(x0_hf, y_hf);
+        HVX_VectorPair xy1_qf = Q6_Wqf32_vmpy_VhfVhf(x1_hf, y_hf);
+
+        rsum0 = Q6_Vqf32_vadd_Vqf32Vqf32(rsum0, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy0_qf), Q6_V_hi_W(xy0_qf)));
+        rsum1 = Q6_Vqf32_vadd_Vqf32Vqf32(rsum1, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy1_qf), Q6_V_hi_W(xy1_qf)));
+    }
+
+    HVX_Vector rsum = hvx_vec_reduce_sum_f32x2(Q6_Vsf_equals_Vqf32(rsum0), Q6_Vsf_equals_Vqf32(rsum1));
+    hvx_vec_store_u(&s[0], 8, rsum);
 }
 static void vec_dot_f16_f16_aa_2x2(const int n, float * restrict s, const void * restrict vx, uint32_t vx_row_size, const void * restrict vy, uint32_t vy_row_size) {
     // Implement 2x2 for F16 AA
@@ -589,7 +651,33 @@ static void vec_dot_f16_f16_aa_2x2(const int n, float * restrict s, const void *
 
 // Rename other f16 funcs wrappers
 static void vec_dot_f16_f16_uu_1x1(const int n, float * restrict s, const void * restrict vx, const void * restrict vy) {
-    vec_dot_f16_f16_uu(n, s, vx, vy);
+    const HVX_UVector * restrict x = (const HVX_UVector *) vx;
+    const HVX_UVector * restrict y = (const HVX_UVector *) vy;
+
+    uint32_t nvec = n / VLEN_FP16; // num full fp16 hvx vectors
+    uint32_t nloe = n % VLEN_FP16; // leftover elements
+
+    HVX_Vector rsum = Q6_V_vsplat_R(0);
+
+    uint32_t i = 0;
+
+    #pragma unroll(4)
+    for (i = 0; i < nvec; i++) {
+        HVX_VectorPair xy_qf = Q6_Wqf32_vmpy_VhfVhf(x[i], y[i]);
+        rsum = Q6_Vqf32_vadd_Vqf32Vqf32(rsum, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy_qf),  Q6_V_hi_W(xy_qf)));
+    }
+
+    if (nloe) {
+        HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe * 2);
+        HVX_Vector x_hf = Q6_V_vand_QV(bmask, x[i]);
+        HVX_Vector y_hf = Q6_V_vand_QV(bmask, y[i]);
+
+        HVX_VectorPair xy_qf = Q6_Wqf32_vmpy_VhfVhf(x_hf, y_hf);
+        rsum = Q6_Vqf32_vadd_Vqf32Vqf32(rsum, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy_qf),  Q6_V_hi_W(xy_qf)));
+    }
+
+    rsum = hvx_vec_reduce_sum_f32(Q6_Vsf_equals_Vqf32(rsum));
+    hvx_vec_store_u(&s[0], 4, rsum);
 }
 static void vec_dot_f16_f16_uu_2x1(const int n, float * restrict s, const void * restrict vx, uint32_t vx_row_size, const void * restrict vy) {
     const HVX_UVector * restrict x0 = (const HVX_UVector *) vx;
@@ -688,7 +776,56 @@ static void vec_dot_f16_f16_uu_2x2(const int n, float * restrict s, const void *
 }
 
 static void vec_dot_f16_f32_uu_1x1(const int n, float * restrict s, const void * restrict vx, const void * restrict vy) {
-    vec_dot_f16_f32_uu(n, s, vx, vy);
+    const HVX_UVector * restrict vx_p = (const HVX_UVector * restrict) vx;
+    const HVX_UVector * restrict vy_p = (const HVX_UVector * restrict) vy;
+
+    uint32_t nvec = n / VLEN_FP16; // num full fp16 hvx vectors
+    uint32_t nloe = n % VLEN_FP16; // leftover elements
+
+    const HVX_Vector zero = Q6_V_vsplat_R(0);
+
+    HVX_Vector       rsum = Q6_V_vsplat_R(0);
+
+    uint32_t i = 0;
+
+    #pragma unroll(2)
+    for (i = 0; i < nvec; i++) {
+        // Load y (fp32) and convert into fp16
+        HVX_Vector y0_qf = Q6_Vqf32_vsub_VsfVsf(vy_p[i*2+0], zero);  // 32 elements
+        HVX_Vector y1_qf = Q6_Vqf32_vsub_VsfVsf(vy_p[i*2+1], zero);  // 32 elements
+        HVX_Vector y_hf  = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(y1_qf, y0_qf)));
+
+        // Load x (fp16)
+        HVX_Vector x_hf  = vx_p[i];
+
+        HVX_VectorPair xy_qf = Q6_Wqf32_vmpy_VhfVhf(x_hf, y_hf);
+
+        rsum = Q6_Vqf32_vadd_Vqf32Vqf32(rsum, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy_qf),  Q6_V_hi_W(xy_qf)));
+    }
+
+    if (nloe) {
+        // Load y (fp32) and convert into fp16
+        HVX_Vector y0_qf = Q6_Vqf32_vsub_VsfVsf(vy_p[i*2+0], zero);  // 32 elements
+        HVX_Vector y1_qf = Q6_Vqf32_vsub_VsfVsf(vy_p[i*2+1], zero);  // 32 elements
+        HVX_Vector y_hf  = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(y1_qf, y0_qf)));
+
+        // Load x (fp16)
+        HVX_Vector x_hf  = vx_p[i];
+
+        // Zero-out unused elements
+        // Note that we need to clear both x and y because they may contain NANs
+        HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe * 2);
+        x_hf = Q6_V_vand_QV(bmask, x_hf);
+        y_hf = Q6_V_vand_QV(bmask, y_hf);
+
+        HVX_VectorPair xy_qf = Q6_Wqf32_vmpy_VhfVhf(x_hf, y_hf);
+
+        rsum = Q6_Vqf32_vadd_Vqf32Vqf32(rsum, Q6_Vqf32_vadd_Vqf32Vqf32(Q6_V_lo_W(xy_qf),  Q6_V_hi_W(xy_qf)));
+    }
+
+    // Convert into fp32 and reduce
+    rsum = hvx_vec_reduce_sum_f32(Q6_Vsf_equals_Vqf32(rsum));
+    hvx_vec_store_u(&s[0], 4, rsum);
 }
 
 #define htp_matmul_tensors_preamble    \
