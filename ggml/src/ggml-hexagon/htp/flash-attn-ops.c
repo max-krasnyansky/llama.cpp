@@ -210,8 +210,8 @@ struct htp_fa_context {
 };
 
 static void flash_attn_ext_f16_thread(unsigned int nth, unsigned int ith, void * data) {
-    struct htp_fa_context * ctx = (struct htp_fa_context *) data;
-    const struct htp_ops_context * octx = ctx->octx;
+    struct htp_fa_context * factx = (struct htp_fa_context *) data;
+    const struct htp_ops_context * octx = factx->octx;
     const struct htp_tensor * q = &octx->src0;
     const struct htp_tensor * k = &octx->src1;
     const struct htp_tensor * v = &octx->src2;
@@ -310,15 +310,15 @@ static void flash_attn_ext_f16_thread(unsigned int nth, unsigned int ith, void *
     const HVX_Vector logit_cap = hvx_vec_splat_f32(logit_softcap);
 
     for (uint32_t ir = ir0; ir < ir1; ++ir) {
-        const uint32_t iq3 = fastdiv(ir, &ctx->src0_div21);
-        const uint32_t iq2 = fastdiv(ir - iq3*neq2*neq1, &ctx->src0_div1);
+        const uint32_t iq3 = fastdiv(ir, &factx->src0_div21);
+        const uint32_t iq2 = fastdiv(ir - iq3*neq2*neq1, &factx->src0_div1);
         const uint32_t iq1 = (ir - iq3*neq2*neq1 - iq2 * neq1);
 
-        const uint32_t ik3 = fastdiv(iq3, &ctx->broadcast_rk3);
-        const uint32_t ik2 = fastdiv(iq2, &ctx->broadcast_rk2);
+        const uint32_t ik3 = fastdiv(iq3, &factx->broadcast_rk3);
+        const uint32_t ik2 = fastdiv(iq2, &factx->broadcast_rk2);
 
-        const uint32_t iv3 = fastdiv(iq3, &ctx->broadcast_rv3);
-        const uint32_t iv2 = fastdiv(iq2, &ctx->broadcast_rv2);
+        const uint32_t iv3 = fastdiv(iq3, &factx->broadcast_rv3);
+        const uint32_t iv2 = fastdiv(iq2, &factx->broadcast_rv2);
 
         // Fetch Q row
         const uint8_t * q_row_ptr = (const uint8_t *) q->data + (iq1*nbq1 + iq2*nbq2 + iq3*nbq3);
@@ -336,8 +336,8 @@ static void flash_attn_ext_f16_thread(unsigned int nth, unsigned int ith, void *
 
         const __fp16 * mp_base = NULL;
         if (mask) {
-            const uint32_t im2 = fastmodulo(iq2, mask->ne[2], &ctx->src3_div2);
-            const uint32_t im3 = fastmodulo(iq3, mask->ne[3], &ctx->src3_div3);
+            const uint32_t im2 = fastmodulo(iq2, mask->ne[2], &factx->src3_div2);
+            const uint32_t im3 = fastmodulo(iq3, mask->ne[3], &factx->src3_div3);
             mp_base = (const __fp16 *) ((const uint8_t *) mask->data + iq1*mask->nb[1] + im2*mask->nb[2] + im3*mask->nb[3]);
         }
 
@@ -562,20 +562,20 @@ int op_flash_attn_ext(struct htp_ops_context * octx) {
         return HTP_STATUS_NO_SUPPORT;
     }
 
-    struct htp_fa_context ctx;
-    ctx.octx = octx;
+    struct htp_fa_context factx;
+    factx.octx = octx;
 
-    ctx.src0_div21 = init_fastdiv_values(q->ne[2] * q->ne[1]);
-    ctx.src0_div1  = init_fastdiv_values(q->ne[1]);
+    factx.src0_div21 = init_fastdiv_values(q->ne[2] * q->ne[1]);
+    factx.src0_div1  = init_fastdiv_values(q->ne[1]);
 
-    ctx.broadcast_rk2 = init_fastdiv_values(q->ne[2]/k->ne[2]);
-    ctx.broadcast_rk3 = init_fastdiv_values(q->ne[3]/k->ne[3]);
-    ctx.broadcast_rv2 = init_fastdiv_values(q->ne[2]/v->ne[2]);
-    ctx.broadcast_rv3 = init_fastdiv_values(q->ne[3]/v->ne[3]);
+    factx.broadcast_rk2 = init_fastdiv_values(q->ne[2]/k->ne[2]);
+    factx.broadcast_rk3 = init_fastdiv_values(q->ne[3]/k->ne[3]);
+    factx.broadcast_rv2 = init_fastdiv_values(q->ne[2]/v->ne[2]);
+    factx.broadcast_rv3 = init_fastdiv_values(q->ne[3]/v->ne[3]);
 
     if (mask) {
-        ctx.src3_div2 = init_fastdiv_values(mask->ne[2]);
-        ctx.src3_div3 = init_fastdiv_values(mask->ne[3]);
+        factx.src3_div2 = init_fastdiv_values(mask->ne[2]);
+        factx.src3_div3 = init_fastdiv_values(mask->ne[3]);
     }
 
     size_t size_q_row_padded = hex_round_up(q->ne[0] * (q->type == HTP_TYPE_F32 ? 4 : 2), 128);
@@ -614,7 +614,7 @@ int op_flash_attn_ext(struct htp_ops_context * octx) {
     octx->dst_spad.data  = octx->src3_spad.data + octx->src3_spad.size;
 
     if (!(octx->flags & HTP_OPFLAGS_SKIP_COMPUTE)) {
-        worker_pool_run_func(octx->ctx->worker_pool, flash_attn_ext_f16_thread, &ctx, octx->n_threads);
+        worker_pool_run_func(octx->ctx->worker_pool, flash_attn_ext_f16_thread, &factx, octx->n_threads);
     }
 
     return HTP_STATUS_OK;
