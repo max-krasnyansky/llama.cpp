@@ -552,7 +552,7 @@ int op_flash_attn_ext(struct htp_ops_context * octx) {
     const struct htp_tensor * q = &octx->src0;
     const struct htp_tensor * k = &octx->src1;
     const struct htp_tensor * v = &octx->src2;
-    const struct htp_tensor * mask = (octx->src3.type != HTP_TYPE_COUNT) ? &octx->src3 : NULL;
+    const struct htp_tensor * mask = (octx->src3.data) ? &octx->src3 : NULL;
     struct htp_tensor * dst = &octx->dst;
 
     // Check support
