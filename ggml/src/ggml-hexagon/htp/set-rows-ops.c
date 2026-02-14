@@ -51,13 +51,13 @@ struct htp_set_rows_context {
 };
 
 static void set_rows_thread_f32_f32(unsigned int nth, unsigned int ith, void *data) {
-    struct htp_set_rows_context * ctx = (struct htp_set_rows_context *)data;
-    struct htp_ops_context * octx = ctx->octx;
+    struct htp_set_rows_context * srctx = (struct htp_set_rows_context *)data;
+    struct htp_ops_context * octx = srctx->octx;
 
     set_rows_preamble;
 
     // parallelize by rows of src0
-    const uint32_t dr  = ctx->src0_nrows_per_thread;
+    const uint32_t dr  = srctx->src0_nrows_per_thread;
     const uint32_t ir0 = dr * ith;
     const uint32_t ir1 = (ir0 + dr < nr) ? (ir0 + dr) : nr;
 
@@ -66,8 +66,8 @@ static void set_rows_thread_f32_f32(unsigned int nth, unsigned int ith, void *da
     for (uint32_t i03 = 0; i03 < ne03; ++i03) {
         for (uint32_t i02 = 0; i02 < ne02; ++i02) {
             for (uint32_t i = ir0; i < ir1; ++i) {
-                const uint32_t i12 = fastmodulo(i03, ne12, &ctx->div_ne12);
-                const uint32_t i11 = fastmodulo(i02, ne11, &ctx->div_ne11);
+                const uint32_t i12 = fastmodulo(i03, ne12, &srctx->div_ne12);
+                const uint32_t i11 = fastmodulo(i02, ne11, &srctx->div_ne11);
                 const uint32_t i10 = i;
 
                 const uintptr_t src1_addr = octx->src1.data + i10*nb10 + i11*nb11 + i12*nb12;
@@ -89,13 +89,13 @@ static void set_rows_thread_f32_f32(unsigned int nth, unsigned int ith, void *da
 }
 
 static void set_rows_thread_f16_f32(unsigned int nth, unsigned int ith, void *data) {
-    struct htp_set_rows_context * ctx = (struct htp_set_rows_context *)data;
-    struct htp_ops_context * octx = ctx->octx;
+    struct htp_set_rows_context * srctx = (struct htp_set_rows_context *)data;
+    struct htp_ops_context * octx = srctx->octx;
 
     set_rows_preamble;
 
     // parallelize by rows of src0
-    const uint32_t dr  = ctx->src0_nrows_per_thread;
+    const uint32_t dr  = srctx->src0_nrows_per_thread;
     const uint32_t ir0 = dr * ith;
     const uint32_t ir1 = (ir0 + dr < nr) ? (ir0 + dr) : nr;
 
@@ -104,8 +104,8 @@ static void set_rows_thread_f16_f32(unsigned int nth, unsigned int ith, void *da
     for (uint32_t i03 = 0; i03 < ne03; ++i03) {
         for (uint32_t i02 = 0; i02 < ne02; ++i02) {
             for (uint32_t i = ir0; i < ir1; ++i) {
-                const uint32_t i12 = fastmodulo(i03, ne12, &ctx->div_ne12);
-                const uint32_t i11 = fastmodulo(i02, ne11, &ctx->div_ne11);
+                const uint32_t i12 = fastmodulo(i03, ne12, &srctx->div_ne12);
+                const uint32_t i11 = fastmodulo(i02, ne11, &srctx->div_ne11);
                 const uint32_t i10 = i;
 
                 const uintptr_t src1_addr = octx->src1.data + i10*nb10 + i11*nb11 + i12*nb12;
@@ -144,20 +144,20 @@ int op_set_rows(struct htp_ops_context * octx) {
         return HTP_STATUS_OK;
     }
 
-    struct htp_set_rows_context ctx;
-    ctx.octx = octx;
-    ctx.div_ne12 = init_fastdiv_values(ne12);
-    ctx.div_ne11 = init_fastdiv_values(ne11);
+    struct htp_set_rows_context srctx;
+    srctx.octx = octx;
+    srctx.div_ne12 = init_fastdiv_values(ne12);
+    srctx.div_ne11 = init_fastdiv_values(ne11);
 
     const uint32_t n_jobs = MIN(nr, octx->n_threads);
-    ctx.src0_nrows_per_thread = (nr + n_jobs - 1) / n_jobs;
+    srctx.src0_nrows_per_thread = (nr + n_jobs - 1) / n_jobs;
 
     switch(octx->dst.type) {
     case HTP_TYPE_F32:
-        worker_pool_run_func(octx->ctx->worker_pool, set_rows_thread_f32_f32, &ctx, n_jobs);
+        worker_pool_run_func(octx->ctx->worker_pool, set_rows_thread_f32_f32, &srctx, n_jobs);
         break;
     case HTP_TYPE_F16:
-        worker_pool_run_func(octx->ctx->worker_pool, set_rows_thread_f16_f32, &ctx, n_jobs);
+        worker_pool_run_func(octx->ctx->worker_pool, set_rows_thread_f16_f32, &srctx, n_jobs);
         break;
     default:
         return HTP_STATUS_NO_SUPPORT;
