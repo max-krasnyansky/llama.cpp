@@ -70,17 +70,7 @@
     const uint32_t nb3 = dst->nb[3];
 
 struct htp_act_context {
-    const struct htp_tensor * src0;
-    const struct htp_tensor * src1;
-    struct htp_tensor *       dst;
-    const int32_t *           op_params;
-
-    struct htp_spad           src0_spad;
-    struct htp_spad           src1_spad;
-    struct htp_spad           dst_spad;
-
-    uint32_t                  src0_nrows_per_thread;
-    struct htp_context *      ctx;
+    struct htp_ops_context *  octx;
 
     // Precomputed values
     const uint8_t *           data_src0;
@@ -101,14 +91,15 @@ struct htp_act_context {
 
     uint32_t                  block;
     uint32_t                  src0_nrows;
+    uint32_t                  src0_nrows_per_thread;
     int                       nc;
 };
 
 static void glu_swiglu_f32_per_thread(unsigned int nth, unsigned int ith, void * data) {
     struct htp_act_context * actx = (struct htp_act_context *) data;
-    const struct htp_tensor * src0 = actx->src0;
-    const struct htp_tensor * src1 = actx->src1;
-    const struct htp_tensor * dst  = actx->dst;
+    const struct htp_tensor * src0 = &actx->octx->src0;
+    const struct htp_tensor * src1 = &actx->octx->src1;
+    const struct htp_tensor * dst  = &actx->octx->dst;
     htp_act_preamble3;
 
     size_t src0_row_size = actx->src0_row_size;
@@ -138,9 +129,9 @@ static void glu_swiglu_f32_per_thread(unsigned int nth, unsigned int ith, void *
     const size_t src1_row_size_aligned = actx->src1_row_size_aligned;
     const size_t dst_row_size_aligned  = actx->dst_row_size_aligned;
 
-    uint8_t * restrict src0_spad_data = actx->src0_spad.data + (ith * actx->src0_spad.size_per_thread);
-    uint8_t * restrict src1_spad_data = actx->src1_spad.data + (ith * actx->src1_spad.size_per_thread);
-    uint8_t * restrict dst_spad_data  = actx->dst_spad.data + (ith * actx->dst_spad.size_per_thread);
+    uint8_t * restrict src0_spad_data = actx->octx->src0_spad.data + (ith * actx->octx->src0_spad.size_per_thread);
+    uint8_t * restrict src1_spad_data = actx->octx->src1_spad.data + (ith * actx->octx->src1_spad.size_per_thread);
+    uint8_t * restrict dst_spad_data  = actx->octx->dst_spad.data + (ith * actx->octx->dst_spad.size_per_thread);
 
     size_t src0_spad_half_size = actx->src0_spad_half_size;
     size_t src1_spad_half_size = actx->src1_spad_half_size;
@@ -150,11 +141,11 @@ static void glu_swiglu_f32_per_thread(unsigned int nth, unsigned int ith, void *
     if (BLOCK == 0) {
         FARF(ERROR,
              "swiglu-f32 : current VTCM reservation %zu is too small for even 1 row per thread, needed at least %zu\n",
-             actx->src0_spad.size_per_thread, src0_row_size_aligned);
+             actx->octx->src0_spad.size_per_thread, src0_row_size_aligned);
         return;
     }
 
-    dma_queue * dma_queue = actx->ctx->dma[ith];
+    dma_queue * dma_queue = actx->octx->ctx->dma[ith];
 
     // See discussion: https://github.com/ggml-org/llama.cpp/pull/18151#issuecomment-3678235379
     for (uint32_t ir = src0_start_row, spad_idx = 0; ir < src0_end_row && spad_idx < 2; ir += BLOCK, spad_idx++) {
@@ -216,9 +207,9 @@ static void glu_swiglu_f32_per_thread(unsigned int nth, unsigned int ith, void *
 
 static void glu_swiglu_oai_f32_per_thread(unsigned int nth, unsigned int ith, void * data) {
     struct htp_act_context * actx = (struct htp_act_context *) data;
-    const struct htp_tensor * src0 = actx->src0;
-    const struct htp_tensor * src1 = actx->src1;
-    const struct htp_tensor * dst  = actx->dst;
+    const struct htp_tensor * src0 = &actx->octx->src0;
+    const struct htp_tensor * src1 = &actx->octx->src1;
+    const struct htp_tensor * dst  = &actx->octx->dst;
     htp_act_preamble3;
 
     uint64_t t1, t2;
@@ -249,9 +240,9 @@ static void glu_swiglu_oai_f32_per_thread(unsigned int nth, unsigned int ith, vo
     const size_t src1_row_size_aligned = actx->src1_row_size_aligned;
     const size_t dst_row_size_aligned  = actx->dst_row_size_aligned;
 
-    uint8_t * restrict src0_spad_data = actx->src0_spad.data + (ith * actx->src0_spad.size_per_thread);
-    uint8_t * restrict src1_spad_data = actx->src1_spad.data + (ith * actx->src1_spad.size_per_thread);
-    uint8_t * restrict dst_spad_data  = actx->dst_spad.data + (ith * actx->dst_spad.size_per_thread);
+    uint8_t * restrict src0_spad_data = actx->octx->src0_spad.data + (ith * actx->octx->src0_spad.size_per_thread);
+    uint8_t * restrict src1_spad_data = actx->octx->src1_spad.data + (ith * actx->octx->src1_spad.size_per_thread);
+    uint8_t * restrict dst_spad_data  = actx->octx->dst_spad.data + (ith * actx->octx->dst_spad.size_per_thread);
 
     size_t src0_spad_half_size = actx->src0_spad_half_size;
     size_t src1_spad_half_size = actx->src1_spad_half_size;
@@ -262,13 +253,13 @@ static void glu_swiglu_oai_f32_per_thread(unsigned int nth, unsigned int ith, vo
         FARF(ERROR,
              "swiglu-oai-f32 : current VTCM reservation %zu is too small for even 1 row per thread, needed at least "
              "%zu\n",
-             actx->src0_spad.size_per_thread, src0_row_size_aligned);
+             actx->octx->src0_spad.size_per_thread, src0_row_size_aligned);
         return;
     }
-    const float alpha = ((const float *) (actx->op_params))[2];
-    const float limit = ((const float *) (actx->op_params))[3];
+    const float alpha = ((const float *) (actx->octx->op_params))[2];
+    const float limit = ((const float *) (actx->octx->op_params))[3];
 
-    dma_queue * dma_queue = actx->ctx->dma[ith];
+    dma_queue * dma_queue = actx->octx->ctx->dma[ith];
 
     // See discussion: https://github.com/ggml-org/llama.cpp/pull/18151#issuecomment-3678235379
     for (uint32_t ir = src0_start_row, spad_idx = 0; ir < src0_end_row && spad_idx < 2; ir += BLOCK, spad_idx++) {
@@ -341,8 +332,8 @@ static void glu_swiglu_oai_f32_per_thread(unsigned int nth, unsigned int ith, vo
 
 static void unary_gelu_f32_per_thread(unsigned int nth, unsigned int ith, void * data) {
     struct htp_act_context * actx = (struct htp_act_context *) data;
-    const struct htp_tensor * src0 = actx->src0;
-    const struct htp_tensor * dst  = actx->dst;
+    const struct htp_tensor * src0 = &actx->octx->src0;
+    const struct htp_tensor * dst  = &actx->octx->dst;
     htp_act_preamble2;
 
     uint64_t t1, t2;
@@ -370,8 +361,8 @@ static void unary_gelu_f32_per_thread(unsigned int nth, unsigned int ith, void *
     // nc/ne0 matches.
     const int ne0_val = actx->nc; // == dst->ne[0]
 
-    uint8_t * src0_spad_data = actx->src0_spad.data + (ith * actx->src0_spad.size_per_thread);
-    uint8_t * dst_spad_data  = actx->dst_spad.data  + (ith * actx->dst_spad.size_per_thread);
+    uint8_t * src0_spad_data = actx->octx->src0_spad.data + (ith * actx->octx->src0_spad.size_per_thread);
+    uint8_t * dst_spad_data  = actx->octx->dst_spad.data  + (ith * actx->octx->dst_spad.size_per_thread);
 
     size_t src0_spad_half_size = actx->src0_spad_half_size;
     size_t dst_spad_half_size  = actx->dst_spad_half_size;
@@ -381,11 +372,11 @@ static void unary_gelu_f32_per_thread(unsigned int nth, unsigned int ith, void *
 
     if (BLOCK == 0) {
         FARF(ERROR, "gelu-f32 : current VTCM reservation %zu is too small for even 1 row per thread, needed at least %zu\n",
-                actx->src0_spad.size_per_thread, src0_row_size_aligned);
+                actx->octx->src0_spad.size_per_thread, src0_row_size_aligned);
         return;
     }
 
-    dma_queue * dma_queue = actx->ctx->dma[ith];
+    dma_queue * dma_queue = actx->octx->ctx->dma[ith];
 
     // See discussion: https://github.com/ggml-org/llama.cpp/pull/18151#issuecomment-3678235379
     for (uint32_t ir = src0_start_row, spad_idx = 0; ir < src0_end_row && spad_idx < 2; ir += BLOCK, spad_idx++) {
@@ -442,8 +433,8 @@ static void unary_gelu_f32_per_thread(unsigned int nth, unsigned int ith, void *
 
 static void unary_silu_f32_per_thread(unsigned int nth, unsigned int ith, void * data) {
     struct htp_act_context * actx = (struct htp_act_context *) data;
-    const struct htp_tensor * src0 = actx->src0;
-    const struct htp_tensor * dst  = actx->dst;
+    const struct htp_tensor * src0 = &actx->octx->src0;
+    const struct htp_tensor * dst  = &actx->octx->dst;
     htp_act_preamble2;
 
     uint64_t t1, t2;
@@ -470,8 +461,8 @@ static void unary_silu_f32_per_thread(unsigned int nth, unsigned int ith, void *
 
     const int ne0_val = actx->nc; // == dst->ne[0]
 
-    uint8_t * src0_spad_data = actx->src0_spad.data + (ith * actx->src0_spad.size_per_thread);
-    uint8_t * dst_spad_data  = actx->dst_spad.data  + (ith * actx->dst_spad.size_per_thread);
+    uint8_t * src0_spad_data = actx->octx->src0_spad.data + (ith * actx->octx->src0_spad.size_per_thread);
+    uint8_t * dst_spad_data  = actx->octx->dst_spad.data  + (ith * actx->octx->dst_spad.size_per_thread);
 
     size_t src0_spad_half_size = actx->src0_spad_half_size;
     size_t dst_spad_half_size  = actx->dst_spad_half_size;
@@ -480,11 +471,11 @@ static void unary_silu_f32_per_thread(unsigned int nth, unsigned int ith, void *
 
     if (BLOCK == 0) {
         FARF(ERROR, "silu-f32 : current VTCM reservation %zu is too small for even 1 row per thread, needed at least %zu\n",
-                actx->src0_spad.size_per_thread, src0_row_size_aligned);
+                actx->octx->src0_spad.size_per_thread, src0_row_size_aligned);
         return;
     }
 
-    dma_queue * dma_queue = actx->ctx->dma[ith];
+    dma_queue * dma_queue = actx->octx->ctx->dma[ith];
 
     // See discussion: https://github.com/ggml-org/llama.cpp/pull/18151#issuecomment-3678235379
     for (uint32_t ir = src0_start_row, spad_idx = 0; ir < src0_end_row && spad_idx < 2; ir += BLOCK, spad_idx++) {
@@ -542,9 +533,9 @@ static const float SQRT_2_OVER_PI  = 0.79788456080286535587989211986876f;
 
 static void glu_geglu_f32_per_thread(unsigned int nth, unsigned int ith, void * data) {
     struct htp_act_context * actx = (struct htp_act_context *) data;
-    const struct htp_tensor * src0 = actx->src0;
-    const struct htp_tensor * src1 = actx->src1;
-    const struct htp_tensor * dst  = actx->dst;
+    const struct htp_tensor * src0 = &actx->octx->src0;
+    const struct htp_tensor * src1 = &actx->octx->src1;
+    const struct htp_tensor * dst  = &actx->octx->dst;
     htp_act_preamble3;
 
     size_t src0_row_size = actx->src0_row_size;
@@ -575,9 +566,9 @@ static void glu_geglu_f32_per_thread(unsigned int nth, unsigned int ith, void * 
     const size_t src1_row_size_aligned = actx->src1_row_size_aligned;
     const size_t dst_row_size_aligned  = actx->dst_row_size_aligned;
 
-    uint8_t * restrict src0_spad_data = actx->src0_spad.data + (ith * actx->src0_spad.size_per_thread);
-    uint8_t * restrict src1_spad_data = actx->src1_spad.data + (ith * actx->src1_spad.size_per_thread);
-    uint8_t * restrict dst_spad_data  = actx->dst_spad.data + (ith * actx->dst_spad.size_per_thread);
+    uint8_t * restrict src0_spad_data = actx->octx->src0_spad.data + (ith * actx->octx->src0_spad.size_per_thread);
+    uint8_t * restrict src1_spad_data = actx->octx->src1_spad.data + (ith * actx->octx->src1_spad.size_per_thread);
+    uint8_t * restrict dst_spad_data  = actx->octx->dst_spad.data + (ith * actx->octx->dst_spad.size_per_thread);
 
     size_t src0_spad_half_size = actx->src0_spad_half_size;
     size_t src1_spad_half_size = actx->src1_spad_half_size;
@@ -587,11 +578,11 @@ static void glu_geglu_f32_per_thread(unsigned int nth, unsigned int ith, void * 
     if (BLOCK == 0) {
         FARF(ERROR,
              "geglu-f32 : current VTCM reservation %zu is too small for even 1 row per thread, needed at least %zu\n",
-             actx->src0_spad.size_per_thread, src0_row_size_aligned);
+             actx->octx->src0_spad.size_per_thread, src0_row_size_aligned);
         return;
     }
 
-    dma_queue * dma_queue = actx->ctx->dma[ith];
+    dma_queue * dma_queue = actx->octx->ctx->dma[ith];
 
     // See discussion: https://github.com/ggml-org/llama.cpp/pull/18151#issuecomment-3678235379
     for (uint32_t ir = src0_start_row, spad_idx = 0; ir < src0_end_row && spad_idx < 2; ir += BLOCK, spad_idx++) {
@@ -761,15 +752,9 @@ static int execute_op_activations_f32(struct htp_ops_context * octx) {
 
         // Prepare context
         struct htp_act_context actx;
-        actx.src0 = src0;
-        actx.src1 = src1;
-        actx.dst  = dst;
-        actx.op_params = octx->op_params;
-        actx.src0_spad = octx->src0_spad;
-        actx.src1_spad = octx->src1_spad;
-        actx.dst_spad  = octx->dst_spad;
+        actx.octx = octx;
+
         actx.src0_nrows_per_thread = octx->src0_nrows_per_thread;
-        actx.ctx = octx->ctx;
 
         actx.src0_row_size = src0_row_size;
         actx.src1_row_size = src1_row_size;
@@ -779,9 +764,9 @@ static int execute_op_activations_f32(struct htp_ops_context * octx) {
         actx.src1_row_size_aligned = src1_row_size_aligned;
         actx.dst_row_size_aligned  = dst_row_size_aligned;
 
-        actx.src0_spad_half_size = actx.src0_spad.size_per_thread / 2;
-        actx.src1_spad_half_size = actx.src1_spad.size_per_thread / 2;
-        actx.dst_spad_half_size  = actx.dst_spad.size_per_thread / 2;
+        actx.src0_spad_half_size = octx->src0_spad.size_per_thread / 2;
+        actx.src1_spad_half_size = octx->src1_spad.size_per_thread / 2;
+        actx.dst_spad_half_size  = octx->dst_spad.size_per_thread / 2;
 
         actx.block = actx.src0_spad_half_size / actx.src0_row_size_aligned;
         actx.src0_nrows = src0_nrows;
