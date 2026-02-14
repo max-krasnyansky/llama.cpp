@@ -53,10 +53,10 @@ struct sum_rows_context {
 };
 
 static void sum_rows_thread_f32(unsigned int nth, unsigned int ith, void *data) {
-    const struct sum_rows_context * ctx = (const struct sum_rows_context *) data;
+    const struct sum_rows_context * smctx = (const struct sum_rows_context *) data;
 
-    const uint32_t rows_per_thread = ctx->rows_per_thread;
-    const uint32_t total_rows      = ctx->total_rows;
+    const uint32_t rows_per_thread = smctx->rows_per_thread;
+    const uint32_t total_rows      = smctx->total_rows;
 
     const uint32_t start_row = rows_per_thread * ith;
     const uint32_t end_row   = MIN(start_row + rows_per_thread, total_rows);
@@ -65,13 +65,13 @@ static void sum_rows_thread_f32(unsigned int nth, unsigned int ith, void *data) 
         return;
     }
 
-    const size_t   src_stride = ctx->src_stride;
-    const size_t   dst_stride = ctx->dst_stride;
-    const uint32_t ne00       = ctx->ne00;
-    const bool     opt_path   = ctx->opt_path;
+    const size_t   src_stride = smctx->src_stride;
+    const size_t   dst_stride = smctx->dst_stride;
+    const uint32_t ne00       = smctx->ne00;
+    const bool     opt_path   = smctx->opt_path;
 
-    const float * restrict src_th = (const float *) (ctx->src_data + (start_row * src_stride));
-    float       * restrict dst_th = (float *)       (ctx->dst_data + (start_row * dst_stride));
+    const float * restrict src_th = (const float *) (smctx->src_data + (start_row * src_stride));
+    float       * restrict dst_th = (float *)       (smctx->dst_data + (start_row * dst_stride));
 
     // Calculate actual number of rows for this thread
     const uint32_t n_rows = end_row - start_row;
@@ -113,7 +113,7 @@ int op_sum_rows(struct htp_ops_context * octx) {
         opt_path = true;
     }
 
-    struct sum_rows_context ctx = {
+    struct sum_rows_context smctx = {
         .src_data        = (const uint8_t *) src0->data,
         .dst_data        = (uint8_t *) dst->data,
         .ne00            = ne00,
@@ -124,7 +124,7 @@ int op_sum_rows(struct htp_ops_context * octx) {
         .opt_path        = opt_path,
     };
 
-    worker_pool_run_func(octx->ctx->worker_pool, sum_rows_thread_f32, &ctx, n_jobs);
+    worker_pool_run_func(octx->ctx->worker_pool, sum_rows_thread_f32, &smctx, n_jobs);
 
     return HTP_STATUS_OK;
 }
