@@ -17,6 +17,11 @@
 #include "htp-msg.h"
 #include "htp-ops.h"
 
+struct htp_unary_context {
+    struct htp_ops_context * octx;
+    uint32_t                 src0_nrows_per_thread;
+};
+
 #define htp_unary_preamble            \
     const uint32_t ne00 = src->ne[0]; \
     const uint32_t ne01 = src->ne[1]; \
@@ -182,14 +187,17 @@ static void sqrt_htp_f32(const float * restrict src,
     }
 }
 
-static void unary_job_f32_per_thread(const struct htp_tensor * src,
-                                     struct htp_tensor *       dst,
-                                     uint8_t *                 spad,
-                                     int                       htp_op,
-                                     int32_t *                 op_params,
-                                     uint32_t                  nth,
-                                     uint32_t                  ith,
-                                     uint32_t                  src0_nrows_per_thread) {
+static void unary_job_f32_per_thread(unsigned int nth, unsigned int ith, void * data) {
+    const struct htp_unary_context * uctx = (const struct htp_unary_context *) data;
+    struct htp_ops_context * octx = uctx->octx;
+
+    const struct htp_tensor * src = &octx->src0;
+    struct htp_tensor *       dst = &octx->dst;
+    uint8_t *                 spad = octx->src0_spad.data;
+    int                       htp_op = octx->op;
+    int32_t *                 op_params = octx->op_params;
+    uint32_t                  src0_nrows_per_thread = uctx->src0_nrows_per_thread;
+
     htp_unary_preamble;
 
     const size_t src0_row_size = nb01;
@@ -249,38 +257,26 @@ static void unary_job_f32_per_thread(const struct htp_tensor * src,
          dst->ne[3], (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
 }
 
-static void unary_job_dispatcher_f32(unsigned int n, unsigned int i, void * data) {
-    struct htp_ops_context * octx = (struct htp_ops_context *) data;
-
-    unary_job_f32_per_thread(&octx->src0, &octx->dst, octx->src0_spad.data, octx->op, octx->op_params, n, i,
-                             octx->src0_nrows_per_thread);
-}
-
 static int execute_op_unary_f32(struct htp_ops_context * octx) {
     int err = HTP_STATUS_OK;
 
     const struct htp_tensor * src0 = &octx->src0;
     struct htp_tensor *       dst  = &octx->dst;
 
-    worker_callback_t unary_op_func;
-    const char *      op_type = NULL;
+    const char * op_type = NULL;
 
     switch (octx->op) {
         case HTP_OP_RMS_NORM:
-            unary_op_func = unary_job_dispatcher_f32;
-            op_type       = "rmsnorm-f32";
+            op_type = "rmsnorm-f32";
             break;
         case HTP_OP_SCALE:
-            unary_op_func = unary_job_dispatcher_f32;
-            op_type       = "scale-f32";
+            op_type = "scale-f32";
             break;
         case HTP_OP_SQR:
-            unary_op_func = unary_job_dispatcher_f32;
-            op_type       = "sqr-f32";
+            op_type = "sqr-f32";
             break;
         case HTP_OP_SQRT:
-            unary_op_func = unary_job_dispatcher_f32;
-            op_type       = "sqrt-f32";
+            op_type = "sqrt-f32";
             break;
 
         default:
@@ -317,9 +313,14 @@ static int execute_op_unary_f32(struct htp_ops_context * octx) {
     if (!(octx->flags & HTP_OPFLAGS_SKIP_COMPUTE)) {
         uint32_t n_jobs = MIN(n_threads, src0_nrows);
 
-        octx->src0_nrows_per_thread = (src0_nrows + n_jobs - 1) / n_jobs;
+        uint32_t src0_nrows_per_thread = (src0_nrows + n_jobs - 1) / n_jobs;
 
-        worker_pool_run_func(octx->ctx->worker_pool, unary_op_func, octx, n_jobs);
+        struct htp_unary_context uctx = {
+            .octx                  = octx,
+            .src0_nrows_per_thread = src0_nrows_per_thread,
+        };
+
+        worker_pool_run_func(octx->ctx->worker_pool, unary_job_f32_per_thread, &uctx, n_jobs);
     }
 
     return err;
