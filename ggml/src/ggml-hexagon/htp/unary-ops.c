@@ -97,14 +97,13 @@ static void hvx_fast_rms_norm_f32(const uint8_t * restrict src,
     }
 }
 
-static void scale_htp_f32(const float * restrict src,
-                          float * restrict dst,
-                          uint8_t * restrict spad,
-                          const uint32_t num_rows,
-                          const uint32_t row_elems,
-                          const size_t   row_size,
-                          int32_t *      op_params,
-                          int            opt_path) {
+static void scale_f32(const float * restrict src,
+                      float * restrict dst,
+                      uint8_t * restrict spad,
+                      const uint32_t num_rows,
+                      const uint32_t row_elems,
+                      const size_t   row_size,
+                      int32_t *      op_params) {
     float scale = 0.f;
     float bias  = 0.f;
     memcpy(&scale, &op_params[0], sizeof(float));
@@ -118,14 +117,13 @@ static void scale_htp_f32(const float * restrict src,
     }
 }
 
-static void rms_norm_htp_f32(const float * restrict src,
-                             float * restrict dst,
-                             uint8_t * restrict spad,
-                             const uint32_t num_rows,
-                             const uint32_t row_elems,
-                             const size_t   row_size,
-                             int32_t *      op_params,
-                             int            opt_path) {
+static void rms_norm_f32(const float * restrict src,
+                         float * restrict dst,
+                         uint8_t * restrict spad,
+                         const uint32_t num_rows,
+                         const uint32_t row_elems,
+                         const size_t   row_size,
+                         int32_t *      op_params) {
     float epsilon = 0.f;
     memcpy(&epsilon, op_params, sizeof(float));
 
@@ -137,14 +135,13 @@ static void rms_norm_htp_f32(const float * restrict src,
     }
 }
 
-static void sqr_htp_f32(const float * restrict src,
-                          float * restrict dst,
-                          uint8_t * restrict spad,
-                          const uint32_t num_rows,
-                          const uint32_t row_elems,
-                          const size_t   row_size,
-                          int32_t *      op_params,
-                          int            opt_path) {
+static void sqr_f32(const float * restrict src,
+                    float * restrict dst,
+                    uint8_t * restrict spad,
+                    const uint32_t num_rows,
+                    const uint32_t row_elems,
+                    const size_t   row_size,
+                    int32_t *      op_params) {
 
     for (uint32_t ir = 0; ir < num_rows; ir++) {
         const uint8_t * restrict src_local = (const uint8_t *)src + (ir * row_size);
@@ -154,14 +151,13 @@ static void sqr_htp_f32(const float * restrict src,
     }
 }
 
-static void sqrt_htp_f32(const float * restrict src,
-                          float * restrict dst,
-                          uint8_t * restrict spad,
-                          const uint32_t num_rows,
-                          const uint32_t row_elems,
-                          const size_t   row_size,
-                          int32_t *      op_params,
-                          int            opt_path) {
+static void sqrt_f32(const float * restrict src,
+                     float * restrict dst,
+                     uint8_t * restrict spad,
+                     const uint32_t num_rows,
+                     const uint32_t row_elems,
+                     const size_t   row_size,
+                     int32_t *      op_params) {
 
     for (uint32_t ir = 0; ir < num_rows; ir++) {
         const uint8_t * restrict src_local = (const uint8_t *)src + (ir * row_size);
@@ -242,16 +238,16 @@ static void unary_job_f32_per_thread(unsigned int nth, unsigned int ith, void * 
         // Process block in VTCM
         switch (htp_op) {
             case HTP_OP_RMS_NORM:
-                rms_norm_htp_f32(src0_spad, dst_spad, NULL, block_size, ne0, src0_row_size_aligned, op_params, 1);
+                rms_norm_f32(src0_spad, dst_spad, NULL, block_size, ne0, src0_row_size_aligned, op_params);
                 break;
             case HTP_OP_SCALE:
-                scale_htp_f32(src0_spad, dst_spad, NULL, block_size, ne0, src0_row_size_aligned, op_params, 1);
+                scale_f32(src0_spad, dst_spad, NULL, block_size, ne0, src0_row_size_aligned, op_params);
                 break;
             case HTP_OP_SQR:
-                sqr_htp_f32(src0_spad, dst_spad, NULL, block_size, ne0, src0_row_size_aligned, op_params, 1);
+                sqr_f32(src0_spad, dst_spad, NULL, block_size, ne0, src0_row_size_aligned, op_params);
                 break;
             case HTP_OP_SQRT:
-                sqrt_htp_f32(src0_spad, dst_spad, NULL, block_size, ne0, src0_row_size_aligned, op_params, 1);
+                sqrt_f32(src0_spad, dst_spad, NULL, block_size, ne0, src0_row_size_aligned, op_params);
                 break;
             default:
                 break;
