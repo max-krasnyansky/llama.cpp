@@ -210,7 +210,7 @@ static void hvx_fast_softmax_f32(const uint8_t * restrict src,
     }
 }
 
-static void softmax_dma_job(unsigned int nth, unsigned int ith, void * data) {
+static void softmax_thread_f32(unsigned int nth, unsigned int ith, void * data) {
     struct htp_softmax_context * smctx = (struct htp_softmax_context *) data;
     struct htp_ops_context * octx = smctx->octx;
 
@@ -255,7 +255,7 @@ static void softmax_dma_job(unsigned int nth, unsigned int ith, void * data) {
 
     const uint32_t BLOCK_LIMIT = smctx->block;
     if (BLOCK_LIMIT == 0) {
-        FARF(ERROR, "softmax-dma: BLOCK is 0\n");
+        FARF(ERROR, "softmax-thread-f32: BLOCK is 0\n");
         return;
     }
 
@@ -267,13 +267,11 @@ static void softmax_dma_job(unsigned int nth, unsigned int ith, void * data) {
 
     // Prefetch loop (up to 2 blocks)
     for (int k = 0; k < 2 && fetch_ir < src0_end_row; k++) {
-        // Calculate block_size at fetch_ir
         uint32_t i1 = fastmodulo(fetch_ir, ne01, &smctx->fastdiv_ne01);
         uint32_t rows_left = ne01 - i1;
         uint32_t block_size = MIN(BLOCK_LIMIT, rows_left);
         block_size = MIN(block_size, src0_end_row - fetch_ir);
 
-        // Calculate pointers for this block
         uint32_t r_div_ne01 = fastdiv(fetch_ir, &smctx->fastdiv_ne01);
         uint32_t i2 = fastmodulo(r_div_ne01, ne02, &smctx->fastdiv_ne02);
         uint32_t i3 = fastdiv(r_div_ne01, &smctx->fastdiv_ne02);
@@ -292,18 +290,14 @@ static void softmax_dma_job(unsigned int nth, unsigned int ith, void * data) {
 
         uint8_t * p_dst = data_dst + i1 * nb1 + i2 * nb2 + i3 * nb3;
 
-        // Push DMA
-        // dst dummy push
         dma_queue_push_vtcm_to_ddr(dma_queue,
             dma_make_ptr(p_dst, dst_spad_base + (spad_idx * dst_spad_half_size)),
             dst_row_size, dst_row_size_aligned, 0);
 
-        // src0 push
         dma_queue_push_ddr_to_vtcm(dma_queue,
             dma_make_ptr(src0_spad_base + (spad_idx * src0_spad_half_size), p_src0),
             src0_row_size_aligned, src0_row_size, block_size);
 
-        // src1 push
         if (smctx->use_src1) {
             dma_queue_push_ddr_to_vtcm(dma_queue,
                 dma_make_ptr(src1_spad_base + (spad_idx * src1_spad_half_size), p_src1),
@@ -314,15 +308,12 @@ static void softmax_dma_job(unsigned int nth, unsigned int ith, void * data) {
         spad_idx = (spad_idx + 1) % 2;
     }
 
-    // Main loop
     while (proc_ir < src0_end_row) {
-        // Calculate block_size at proc_ir
         uint32_t i1 = fastmodulo(proc_ir, ne01, &smctx->fastdiv_ne01);
         uint32_t rows_left = ne01 - i1;
         uint32_t block_size = MIN(BLOCK_LIMIT, rows_left);
         block_size = MIN(block_size, src0_end_row - proc_ir);
 
-        // ALiBi slope calculation
         uint32_t r_div_ne01 = fastdiv(proc_ir, &smctx->fastdiv_ne01);
         uint32_t i2 = fastmodulo(r_div_ne01, ne02, &smctx->fastdiv_ne02);
 
@@ -336,7 +327,6 @@ static void softmax_dma_job(unsigned int nth, unsigned int ith, void * data) {
                         1.0f;
         }
 
-        // Pop pointers
         uint8_t * d_spad_ptr = (uint8_t *)dma_queue_pop(dma_queue).src;
         uint8_t * s0_spad_ptr = (uint8_t *)dma_queue_pop(dma_queue).dst;
         uint8_t * s1_spad_ptr = NULL;
@@ -344,13 +334,11 @@ static void softmax_dma_job(unsigned int nth, unsigned int ith, void * data) {
             s1_spad_ptr = (uint8_t *)dma_queue_pop(dma_queue).dst;
         }
 
-        // Compute
         for (uint32_t ib = 0; ib < block_size; ib++) {
             uint8_t * s0_curr = s0_spad_ptr + ib * src0_row_size_aligned;
             uint8_t * s1_curr = (smctx->use_src1) ? s1_spad_ptr + ib * src1_row_size_aligned : NULL;
             uint8_t * d_curr  = d_spad_ptr + ib * dst_row_size_aligned;
 
-            // Prep
             if (smctx->use_src1 && !smctx->use_f16) {
                 hvx_fast_softmax_prep_f32(s0_curr, s0_curr, ne00, smctx->scale, s1_curr, slope);
             } else if (smctx->use_src1 && smctx->use_f16) {
@@ -364,7 +352,6 @@ static void softmax_dma_job(unsigned int nth, unsigned int ith, void * data) {
                 hvx_scale_f32(s0_curr, s0_curr, ne00, smctx->scale);
             }
 
-            // Softmax
             uint8_t * scratch = NULL;
             if (smctx->use_src1) {
                 scratch = s1_curr;
@@ -378,7 +365,6 @@ static void softmax_dma_job(unsigned int nth, unsigned int ith, void * data) {
             hvx_fast_softmax_f32(s0_curr, d_curr, scratch, ne00);
         }
 
-        // Push output to DDR
         {
              uint32_t r_div_ne01_p = fastdiv(proc_ir, &smctx->fastdiv_ne01);
              uint32_t i1_p = fastmodulo(proc_ir, ne01, &smctx->fastdiv_ne01);
@@ -394,7 +380,6 @@ static void softmax_dma_job(unsigned int nth, unsigned int ith, void * data) {
 
         proc_ir += block_size;
 
-        // Prefetch next
         if (fetch_ir < src0_end_row) {
              uint32_t i1_next = fastmodulo(fetch_ir, ne01, &smctx->fastdiv_ne01);
              uint32_t rows_left_next = ne01 - i1_next;
@@ -561,7 +546,7 @@ static int execute_op_softmax_f32(struct htp_ops_context * octx) {
     if (!(octx->flags & HTP_OPFLAGS_SKIP_COMPUTE)) {
         uint32_t n_jobs             = MIN(n_threads, src0_nrows);
         smctx.src0_nrows_per_thread = (src0_nrows + n_jobs - 1) / n_jobs;
-        worker_pool_run_func(octx->ctx->worker_pool, softmax_dma_job, &smctx, n_jobs);
+        worker_pool_run_func(octx->ctx->worker_pool, softmax_thread_f32, &smctx, n_jobs);
     }
 
     return err;
