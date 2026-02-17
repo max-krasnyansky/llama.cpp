@@ -301,7 +301,6 @@ static void rope_job_f32(unsigned int nth, unsigned int ith, void * data) {
     const int32_t mode    = rctx->mode;
     const bool    is_neox = mode & HTP_ROPE_TYPE_NEOX;
     const int32_t half_dims = rctx->n_dims / 2;
-    const size_t  remain_bytes = (ne0 - rctx->n_dims) * sizeof(float);
 
     // VTCM setup
     uint8_t * thread_vtcm_base = octx->src0_spad.data + (ith * octx->src0_spad.size_per_thread);
@@ -326,122 +325,86 @@ static void rope_job_f32(unsigned int nth, unsigned int ith, void * data) {
     const float * freq_factors = (src2 && src2->data) ? (const float *) src2->data : NULL;
     uint32_t prev_i2 = (uint32_t)-1;
 
-    // Check contiguous
-    bool contiguous = (nb01 == ne00 * sizeof(float)) && (nb02 == ne01 * nb01) && (nb03 == ne02 * nb02);
+    for (uint32_t ir = src0_start_row, spad_idx = 0; ir < src0_end_row && spad_idx < 2; ir += BLOCK, spad_idx++) {
+        // Dummy DMA transaction for sequencing (interleaving dst,src,dst,...)
+        // dst is dummy (size 0)
+        // Use dst->data even though length is 0, to avoid potential NULL dereference issues in DMA engine.
+        dma_queue_push_vtcm_to_ddr(dma_queue,
+            dma_make_ptr(dst->data, dst_spad_base + (spad_idx * dst_spad_half_size)),
+            rctx->dst_row_size, rctx->dst_row_size_aligned, 0);
+
+        uint32_t i1 = fastmodulo(ir, ne01, &rctx->fastdiv_ne01);
+        uint32_t r_div_ne01 = fastdiv(ir, &rctx->fastdiv_ne01);
+        uint32_t i2 = fastmodulo(r_div_ne01, ne02, &rctx->fastdiv_ne02);
+        uint32_t i3 = fastdiv(r_div_ne01, &rctx->fastdiv_ne02);
+        const char * src_addr = (const char *) src0->data + i3 * nb03 + i2 * nb02 + i1 * nb01;
+
+        dma_queue_push_ddr_to_vtcm(dma_queue,
+            dma_make_ptr(src0_spad_base + (spad_idx * src0_spad_half_size), src_addr),
+            rctx->src0_row_size_aligned, rctx->src0_row_size, 1);
+    }
 
     for (uint32_t ir = src0_start_row; ir < src0_end_row; ir += BLOCK) {
-        const uint32_t block_size = MIN(BLOCK, src0_end_row - ir);
-        int spad_idx = (ir / BLOCK) % 2;
+        float * dst_spad  = (float *) dma_queue_pop(dma_queue).src;
+        float * src0_spad = (float *) dma_queue_pop(dma_queue).dst;
 
-        // Push DMA for src0
-        if (contiguous) {
-             const char * src_addr = (const char *) src0->data + ir * nb01; // Contiguous: ir maps linearly
-             dma_queue_push_ddr_to_vtcm(dma_queue,
-                 dma_make_ptr(src0_spad_base + (spad_idx * src0_spad_half_size), src_addr),
-                 rctx->src0_row_size_aligned, rctx->src0_row_size, block_size);
+        // Process block (single row)
+        // Recalculate indices for params
+        uint32_t i1 = fastmodulo(ir, ne01, &rctx->fastdiv_ne01);
+        uint32_t r_div_ne01 = fastdiv(ir, &rctx->fastdiv_ne01);
+        uint32_t i2 = fastmodulo(r_div_ne01, ne02, &rctx->fastdiv_ne02);
+        uint32_t i3 = fastdiv(r_div_ne01, &rctx->fastdiv_ne02);
+
+        if (i2 != prev_i2) {
+            const int32_t p = pos[i2];
+            rope_cache_init(p, rctx->freq_scale, freq_factors, rctx->corr_dims, ne0, rctx->ext_factor,
+                            rctx->attn_factor, theta_cache, rctx->theta_scale);
+            prev_i2 = i2;
+        }
+
+        // Vectorized part
+        if (is_neox) {
+            hvx_calc_rope_neox_f32(src0_spad, dst_spad, rctx->n_dims, theta_cache);
         } else {
-            // Push one by one
-            uint8_t * spad_curr = src0_spad_base + (spad_idx * src0_spad_half_size);
-            for (uint32_t b = 0; b < block_size; ++b) {
-                uint32_t r = ir + b;
-                uint32_t i1 = fastmodulo(r, ne01, &rctx->fastdiv_ne01);
-                uint32_t r_div_ne01 = fastdiv(r, &rctx->fastdiv_ne01);
-                uint32_t i2 = fastmodulo(r_div_ne01, ne02, &rctx->fastdiv_ne02);
-                uint32_t i3 = fastdiv(r_div_ne01, &rctx->fastdiv_ne02);
-
-                const char * src_addr = (const char *) src0->data + i3 * nb03 + i2 * nb02 + i1 * nb01;
-                dma_queue_push_ddr_to_vtcm(dma_queue,
-                    dma_make_ptr(spad_curr, src_addr),
-                    rctx->src0_row_size_aligned, rctx->src0_row_size, 1);
-                spad_curr += rctx->src0_row_size_aligned;
-            }
+            hvx_calc_rope_f32(src0_spad, dst_spad, rctx->n_dims, theta_cache);
         }
 
-        // Wait for DMA
-        // If contiguous, 1 pop. Else block_size pops.
-        int n_pops = contiguous ? 1 : block_size;
-        float * src0_spad = NULL;
-        for (int p = 0; p < n_pops; ++p) {
-            dma_ptr ptr = dma_queue_pop(dma_queue);
-            if (p == 0) src0_spad = (float *) ptr.dst; // Base of loaded buffer
-        }
-        // Use double buffer pointer directly to be safe in case pop returns something else (unlikely if logic correct)
-        src0_spad = (float *) (src0_spad_base + (spad_idx * src0_spad_half_size));
-        float * dst_spad = (float *) (dst_spad_base + (spad_idx * dst_spad_half_size));
-
-        // Process block
-        for (uint32_t b = 0; b < block_size; ++b) {
-            uint32_t r = ir + b;
-            // Recalculate indices for params
-            uint32_t i1 = fastmodulo(r, ne01, &rctx->fastdiv_ne01);
-            uint32_t r_div_ne01 = fastdiv(r, &rctx->fastdiv_ne01);
-            uint32_t i2 = fastmodulo(r_div_ne01, ne02, &rctx->fastdiv_ne02);
-
-            if (i2 != prev_i2) {
-                const int32_t p = pos[i2];
-                rope_cache_init(p, rctx->freq_scale, freq_factors, rctx->corr_dims, ne0, rctx->ext_factor,
-                                rctx->attn_factor, theta_cache, rctx->theta_scale);
-                prev_i2 = i2;
-            }
-
-            float * src_row = (float *) ((uint8_t *) src0_spad + b * rctx->src0_row_size_aligned);
-            float * dst_row = (float *) ((uint8_t *) dst_spad  + b * rctx->dst_row_size_aligned);
-
-            // Vectorized part
+        // Scalar tail of n_dims
+        int processed = (rctx->n_dims >> 6) << 6; // multiples of 64
+        for (int i = processed; i < rctx->n_dims; i += 2) {
+            const float cos_theta = theta_cache[i];
+            const float sin_theta = theta_cache[i+1];
             if (is_neox) {
-                hvx_calc_rope_neox_f32(src_row, dst_row, rctx->n_dims, theta_cache);
+                float x0 = src0_spad[i];
+                float x1 = src0_spad[i + half_dims];
+                dst_spad[i]             = x0 * cos_theta - x1 * sin_theta;
+                dst_spad[i + half_dims] = x0 * sin_theta + x1 * cos_theta;
             } else {
-                hvx_calc_rope_f32(src_row, dst_row, rctx->n_dims, theta_cache);
-            }
-
-            // Scalar tail of n_dims
-            int processed = (rctx->n_dims >> 6) << 6; // multiples of 64
-            for (int i = processed; i < rctx->n_dims; i += 2) {
-                const float cos_theta = theta_cache[i];
-                const float sin_theta = theta_cache[i+1];
-                if (is_neox) {
-                    float x0 = src_row[i];
-                    float x1 = src_row[i + half_dims];
-                    dst_row[i]             = x0 * cos_theta - x1 * sin_theta;
-                    dst_row[i + half_dims] = x0 * sin_theta + x1 * cos_theta;
-                } else {
-                    float x0 = src_row[i];
-                    float x1 = src_row[i+1];
-                    dst_row[i]   = x0 * cos_theta - x1 * sin_theta;
-                    dst_row[i+1] = x0 * sin_theta + x1 * cos_theta;
-                }
-            }
-
-            // Copy remaining bytes
-            if (remain_bytes > 0) {
-                // If not in place, copy. If in place, src_row is dst_row (Wait, src0_spad != dst_spad usually)
-                // In double buffering, src0_spad and dst_spad are distinct.
-                // So we must always copy remain_bytes.
-                memcpy(dst_row + rctx->n_dims, src_row + rctx->n_dims, remain_bytes);
+                float x0 = src0_spad[i];
+                float x1 = src0_spad[i+1];
+                dst_spad[i]   = x0 * cos_theta - x1 * sin_theta;
+                dst_spad[i+1] = x0 * sin_theta + x1 * cos_theta;
             }
         }
 
-        // Push DMA for dst
-        if (contiguous) {
-             char * dst_addr = (char *) dst->data + ir * nb01;
-             dma_queue_push_vtcm_to_ddr(dma_queue,
-                 dma_make_ptr(dst_addr, dst_spad), // src in ptr is VTCM
-                 rctx->dst_row_size, rctx->dst_row_size_aligned, block_size);
-        } else {
-            uint8_t * spad_curr = (uint8_t *) dst_spad;
-            for (uint32_t b = 0; b < block_size; ++b) {
-                uint32_t r = ir + b;
-                uint32_t i1 = fastmodulo(r, ne01, &rctx->fastdiv_ne01);
-                uint32_t r_div_ne01 = fastdiv(r, &rctx->fastdiv_ne01);
-                uint32_t i2 = fastmodulo(r_div_ne01, ne02, &rctx->fastdiv_ne02);
-                uint32_t i3 = fastdiv(r_div_ne01, &rctx->fastdiv_ne02);
+        char * dst_addr = (char *) dst->data + i3 * nb3 + i2 * nb2 + i1 * nb1;
+        dma_queue_push_vtcm_to_ddr(dma_queue,
+            dma_make_ptr(dst_addr, dst_spad),
+            rctx->dst_row_size, rctx->dst_row_size_aligned, 1);
 
-                char * dst_addr = (char *) dst->data + i3 * nb3 + i2 * nb2 + i1 * nb1;
-                dma_queue_push_vtcm_to_ddr(dma_queue,
-                    dma_make_ptr(dst_addr, spad_curr),
-                    rctx->dst_row_size, rctx->dst_row_size_aligned, 1);
-                spad_curr += rctx->dst_row_size_aligned;
-            }
+        // Prefetch next
+        const uint32_t pref_block = (ir + BLOCK * 2);
+        if (pref_block < src0_end_row) {
+            // Re-calculate src ptr for prefetch
+            uint32_t pi1 = fastmodulo(pref_block, ne01, &rctx->fastdiv_ne01);
+            uint32_t pr_div_ne01 = fastdiv(pref_block, &rctx->fastdiv_ne01);
+            uint32_t pi2 = fastmodulo(pr_div_ne01, ne02, &rctx->fastdiv_ne02);
+            uint32_t pi3 = fastdiv(pr_div_ne01, &rctx->fastdiv_ne02);
+            const char * psrc_addr = (const char *) src0->data + pi3 * nb03 + pi2 * nb02 + pi1 * nb01;
+
+            dma_queue_push_ddr_to_vtcm(dma_queue,
+                dma_make_ptr(src0_spad, psrc_addr), // reusing src0_spad buffer
+                rctx->src0_row_size_aligned, rctx->src0_row_size, 1);
         }
     }
 
@@ -516,52 +479,6 @@ static int execute_op_rope_f32(struct htp_ops_context * octx) {
     rctx.src0_row_size_aligned = src0_row_size_aligned;
     rctx.dst_row_size_aligned  = dst_row_size_aligned;
     rctx.theta_cache_offset = theta_cache_size_aligned;
-
-    // Calculate block size
-    // We are using hardcoded 2 blocks (double buffering) so block size is 1 per buffer half.
-    // Wait, block in act-ops.c is "how many rows we process per loop iteration".
-    // Since we allocated 2 * row_size, we can process 1 row at a time in pipeline,
-    // or if we allocated M * row_size, we can process M/2.
-    // Here we allocated exactly 2 * row_size. So block size is 1 (batch of 1 row).
-    // The DMA loop processes BLOCK rows per iteration of the outer loop,
-    // and inside that loop it does double buffering (pipeline depth 2).
-    // My implementation of rope_job_f32 uses `ir += BLOCK`.
-    // And `spad_idx = (ir / BLOCK) % 2` ? No, I used `spad_idx = (ir / BLOCK) % 2` which is wrong if BLOCK > 1.
-    // In act-ops: `ir += BLOCK`. `spad_idx` iterates 0..1 inside the loop.
-    // My implementation:
-    // `for (uint32_t ir = src0_start_row; ir < src0_end_row; ir += BLOCK)`
-    //    `int spad_idx = (ir / BLOCK) % 2;`
-    // This implies I am not using the loop-inside-loop structure of act-ops.
-    // act-ops has:
-    // `for (ir ...)` {
-    //    fill pipe (2 pushes)
-    // }
-    // `for (ir ...)` {
-    //    pop, process, push result, push next prefetch
-    // }
-    // My implementation in rope_job_f32 (which I wrote in prev step) was:
-    // `for (ir ...)` {
-    //    push
-    //    wait
-    //    process
-    //    push back
-    // }
-    // This is NOT double buffering pipeline. This is synchronous DMA inside loop.
-    // And I used `spad_idx = (ir / BLOCK) % 2`.
-    // If BLOCK=1, this toggles 0, 1.
-    // So I am using 2 buffers, but I am waiting for completion before processing.
-    // This is effectively single buffered performance wise but using 2 buffers.
-    // To get double buffering I need to pipeline: Push N, Push N+1. Wait N, Process N, Push N+2...
-
-    // However, the user asked to "add support for using DMA and VTCM".
-    // I implemented a simple version first.
-    // The prompt says "optimize rope ops".
-    // The current implementation I wrote is "Push -> Pop -> Process". This is blocking.
-    // But dma_queue_pop waits.
-    // To optimize, I should have pushed ahead.
-    // But I already committed rope_job_f32.
-    // Let's stick with BLOCK = 1 for now to match the code I wrote.
-    // (My code: `int spad_idx = (ir / BLOCK) % 2;`)
 
     rctx.block_size = 1;
     rctx.src0_spad_half_size = src0_row_size_aligned;
