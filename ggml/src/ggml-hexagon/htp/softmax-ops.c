@@ -18,6 +18,9 @@
 #include "htp-msg.h"
 #include "htp-ops.h"
 
+#define HTP_SOFTMAX_SPAD_NROWS  16
+#define HTP_SOFTMAX_SPAD_BLOCK  (HTP_SOFTMAX_SPAD_NROWS/2)
+
 #define htp_softmax_preamble3                              \
     const uint32_t ne00 = src0->ne[0];                     \
     const uint32_t ne01 = src0->ne[1];                     \
@@ -60,14 +63,19 @@ struct htp_softmax_context {
     float m0;
     float m1;
 
-    uint32_t src0_nrows_per_thread;
-    struct fastdiv_values fastdiv_ne01;
-    struct fastdiv_values fastdiv_ne02;
-    struct fastdiv_values fastdiv_ne12; // For mask broadcasting
-    struct fastdiv_values fastdiv_ne13; // For mask broadcasting
-    size_t spad_stride;
-
     struct htp_ops_context * octx;
+
+    size_t src0_row_size;
+    size_t dst_row_size;
+    size_t src0_row_size_aligned;
+    size_t dst_row_size_aligned;
+    size_t spad_pad_offset;
+    size_t spad_src1_offset; // only used if use_src1
+    size_t src1_row_size;
+    size_t src1_row_size_aligned;
+
+    uint32_t src0_nrows;
+    uint32_t src0_nrows_per_thread;
 };
 
 static void init_softmax_ctx(struct htp_softmax_context * smctx, struct htp_ops_context * octx) {
@@ -90,18 +98,6 @@ static void init_softmax_ctx(struct htp_softmax_context * smctx, struct htp_ops_
 
     smctx->octx = octx;
 
-    // Initialize fastdiv values
-    const uint32_t ne01 = src0->ne[1];
-    const uint32_t ne02 = src0->ne[2];
-
-    if (ne01 > 0) smctx->fastdiv_ne01 = init_fastdiv_values(ne01);
-    if (ne02 > 0) smctx->fastdiv_ne02 = init_fastdiv_values(ne02);
-
-    const uint32_t ne12 = (src1->ne[0]) ? src1->ne[2] : 1;
-    const uint32_t ne13 = (src1->ne[0]) ? src1->ne[3] : 1;
-
-    if (ne12 > 0) smctx->fastdiv_ne12 = init_fastdiv_values(ne12);
-    if (ne13 > 0) smctx->fastdiv_ne13 = init_fastdiv_values(ne13);
 }
 
 static void hvx_fast_softmax_prep_f32(const uint8_t * restrict src,
@@ -214,7 +210,7 @@ static void softmax_job_f32(unsigned int nth, unsigned int ith, void * data) {
 
     htp_softmax_preamble3;
 
-    const uint32_t src0_nrows            = ne01 * ne02 * ne03;  // src0 rows
+    const uint32_t src0_nrows            = smctx->src0_nrows;
     const uint32_t src0_nrows_per_thread = smctx->src0_nrows_per_thread;
 
     const uint32_t src0_start_row = src0_nrows_per_thread * ith;
@@ -228,110 +224,174 @@ static void softmax_job_f32(unsigned int nth, unsigned int ith, void * data) {
     uint64_t t1, t2;
     t1 = HAP_perf_get_qtimer_count();
 
-    int is_aligned = 1;
-    int opt_path   = 0;
-    if (!hex_is_aligned((void *) src0->data, VLEN) || !hex_is_aligned((void *) dst->data, VLEN)) {
-        is_aligned = 0;
-        FARF(HIGH, "softmax-f32: unaligned addresses in elementwise op, possibly slower execution\n");
-    }
-    if ((1 == is_aligned) && !(nb01 & (VLEN - 1))) {
-        opt_path = 1;
-    }
+    uint8_t * src0_spad_base_ptr = octx->src0_spad.data + (ith * octx->src0_spad.size_per_thread);
+    uint8_t * dst_spad_base_ptr  = octx->dst_spad.data + (ith * octx->dst_spad.size_per_thread);
 
-    uint8_t * src0_spad_data = octx->src0_spad.data + (ith * smctx->spad_stride);
-    uint8_t * src1_spad_data = octx->src1_spad.data + (ith * smctx->spad_stride);
-    uint8_t * dst_spad_data  = octx->dst_spad.data + (ith * smctx->spad_stride);
-
-    float * wp0 = (float *) src0_spad_data;
-    float * wp1 = (float *) src1_spad_data;
-    float * wp2 = (float *) dst_spad_data;
+    dma_queue * dma_queue = octx->ctx->dma[ith];
 
     uint32_t prev_i2 = (uint32_t)-1;
     float slope = 1.0f;
 
-    for (uint32_t r = src0_start_row; r < src0_end_row; ++r) {
-        uint32_t i1 = fastmodulo(r, ne01, &smctx->fastdiv_ne01);
-        uint32_t r_div_ne01 = fastdiv(r, &smctx->fastdiv_ne01);
-        uint32_t i2 = fastmodulo(r_div_ne01, ne02, &smctx->fastdiv_ne02);
-        uint32_t i3 = fastdiv(r_div_ne01, &smctx->fastdiv_ne02);
+    const bool use_src1 = smctx->use_src1;
 
-        // Map to original logic indices
-        // i01 = i1
-        // i02 = i2
-        // i03 = i3
+    // Initial indices
+    uint32_t cur_r = src0_start_row;
+    uint32_t cur_i3 = cur_r / (ne02 * ne01);
+    uint32_t rem = cur_r % (ne02 * ne01);
+    uint32_t cur_i2 = rem / ne01;
+    uint32_t cur_i1 = rem % ne01;
 
-        const uint32_t i11 = i1;
-        // const uint32_t i12 = i2 % ne12;
-        // const uint32_t i13 = i3 % ne13;
+    // Prefetch loop variables
+    uint32_t pf_r = cur_r;
+    uint32_t pf_i1 = cur_i1;
+    uint32_t pf_i2 = cur_i2;
+    uint32_t pf_i3 = cur_i3;
+    uint32_t pf_rem = src0_end_row - cur_r;
 
-        uint32_t i12, i13;
-        if (ne12 == ne02) {
-             i12 = i2;
-        } else {
-             i12 = fastmodulo(i2, ne12, &smctx->fastdiv_ne12);
+    // Compute loop variables
+    uint32_t cm_r = cur_r;
+    uint32_t cm_i1 = cur_i1;
+    uint32_t cm_i2 = cur_i2;
+    uint32_t cm_i3 = cur_i3;
+    uint32_t cm_rem = src0_end_row - cur_r;
+
+    while (cm_rem > 0) {
+        // PREFETCH
+        // Fill up to HTP_SOFTMAX_SPAD_NROWS if queue depth is low
+        while (pf_rem > 0 && dma_queue_depth(dma_queue) < (HTP_SOFTMAX_SPAD_NROWS / HTP_SOFTMAX_SPAD_BLOCK)) {
+             uint32_t block = MIN(pf_rem, HTP_SOFTMAX_SPAD_BLOCK);
+             uint32_t rows_in_i1 = ne01 - pf_i1;
+             block = MIN(block, rows_in_i1);
+
+             uint32_t pf_slot = (pf_r - src0_start_row) % HTP_SOFTMAX_SPAD_NROWS;
+             uint32_t slots_avail = HTP_SOFTMAX_SPAD_NROWS - pf_slot;
+             block = MIN(block, slots_avail);
+
+             uint8_t * s0_spad = src0_spad_base_ptr + pf_slot * smctx->src0_row_size_aligned;
+             uint8_t * d_spad  = dst_spad_base_ptr  + pf_slot * smctx->dst_row_size_aligned;
+
+             const uint8_t * s0_addr = (const uint8_t *) src0->data + pf_i3 * nb03 + pf_i2 * nb02 + pf_i1 * nb01;
+
+             uint8_t * s1_spad = NULL;
+             const uint8_t * s1_addr = NULL;
+             size_t s1_stride = 0;
+
+             if (use_src1) {
+                 uint32_t i12 = (ne12 == ne02) ? pf_i2 : (pf_i2 % ne12);
+                 uint32_t i13 = (ne13 == ne03) ? pf_i3 : (pf_i3 % ne13);
+                 uint32_t i11 = (ne11 == ne01) ? pf_i1 : (pf_i1 % ne11);
+
+                 s1_addr = (const uint8_t *) src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11;
+                 s1_spad = src0_spad_base_ptr + smctx->spad_src1_offset + pf_slot * smctx->src1_row_size_aligned;
+                 s1_stride = (ne11 == 1) ? 0 : nb11;
+             }
+
+             // Push Dummy DST (to carry pointer)
+             dma_queue_push_vtcm_to_ddr(dma_queue, dma_make_ptr((void*)dst->data, d_spad), 0, 0, 0);
+
+             // Push SRC0
+             dma_queue_push_ddr_to_vtcm(dma_queue, dma_make_ptr(s0_spad, s0_addr),
+                                        smctx->src0_row_size_aligned, smctx->src0_row_size, block);
+
+             // Push SRC1
+             if (use_src1) {
+                 dma_queue_push(dma_queue, dma_make_ptr(s1_spad, s1_addr),
+                                smctx->src1_row_size_aligned, // dst_stride
+                                s1_stride, // src_stride
+                                smctx->src1_row_size, // width
+                                block);
+             }
+
+             pf_r += block;
+             pf_i1 += block;
+             if (pf_i1 >= ne01) {
+                 pf_i1 = 0;
+                 pf_i2++;
+                 if (pf_i2 >= ne02) {
+                     pf_i2 = 0;
+                     pf_i3++;
+                 }
+             }
+             pf_rem -= block;
         }
 
-        if (ne13 == ne03) {
-             i13 = i3;
-        } else {
-             i13 = fastmodulo(i3, ne13, &smctx->fastdiv_ne13);
+        // COMPUTE
+        uint32_t cm_slot = (cm_r - src0_start_row) % HTP_SOFTMAX_SPAD_NROWS;
+        uint32_t c_block = MIN(cm_rem, HTP_SOFTMAX_SPAD_BLOCK);
+        uint32_t rows_in_i1 = ne01 - cm_i1;
+        c_block = MIN(c_block, rows_in_i1);
+        uint32_t slots_avail = HTP_SOFTMAX_SPAD_NROWS - cm_slot;
+        c_block = MIN(c_block, slots_avail);
+
+        uint8_t * d_spad = (uint8_t *) dma_queue_pop(dma_queue).src;
+        uint8_t * s0_spad = (uint8_t *) dma_queue_pop(dma_queue).dst;
+        uint8_t * s1_spad = NULL;
+        if (use_src1) {
+            s1_spad = (uint8_t *) dma_queue_pop(dma_queue).dst;
         }
 
-        // ALiBi
-        if (i2 != prev_i2) {
-            const uint32_t h = i2;  // head
+        uint8_t * p_spad = src0_spad_base_ptr + smctx->spad_pad_offset + cm_slot * smctx->src0_row_size_aligned;
 
-            slope = (smctx->max_bias > 0.0f) ?
-                        h < smctx->n_head_log2 ?
-                        powf(smctx->m0, h + 1) :
-                        powf(smctx->m1, 2 * (h - smctx->n_head_log2) + 1) :
-                        1.0f;
-            prev_i2 = i2;
-        }
+        for (uint32_t b = 0; b < c_block; ++b) {
+            uint32_t cur_i2_local = cm_i2; // constant for block
 
-        float * sp = (float *) ((char *) octx->src0.data + i1 * nb01 + i2 * nb02 + i3 * nb03);
-        float * dp = (float *) ((char *) octx->dst.data + i1 * nb1 + i2 * nb2 + i3 * nb3);
+            // ALiBi
+            if (cur_i2_local != prev_i2) {
+                const uint32_t h = cur_i2_local;
+                slope = (smctx->max_bias > 0.0f) ?
+                            h < smctx->n_head_log2 ?
+                            powf(smctx->m0, h + 1) :
+                            powf(smctx->m1, 2 * (h - smctx->n_head_log2) + 1) :
+                            1.0f;
+                prev_i2 = cur_i2_local;
+            }
 
-        // broadcast the mask across rows
-        __fp16 * mp_f16 = (smctx->use_src1) ?
-                              (__fp16 *) ((char *) octx->src1.data + i11 * nb11 + i12 * nb12 + i13 * nb13) :
-                              NULL;
-        float *  mp_f32 = (smctx->use_src1) ?
-                              (float *) ((char *) octx->src1.data + i11 * nb11 + i12 * nb12 + i13 * nb13) :
-                              NULL;
+            uint8_t * row_s0 = s0_spad + b * smctx->src0_row_size_aligned;
+            uint8_t * row_d  = d_spad  + b * smctx->dst_row_size_aligned;
+            uint8_t * row_p  = p_spad  + b * smctx->src0_row_size_aligned;
 
-        if ((1 == opt_path) && (mp_f32) && !(smctx->use_f16)) {
-            hvx_fast_softmax_prep_f32((const uint8_t *) sp, (uint8_t *) wp0, ne00, smctx->scale,
-                                      (const uint8_t *) mp_f32, slope);
-        } else {
-            hvx_scale_f32((uint8_t *) wp0, (const uint8_t *) sp, ne00, smctx->scale);
-            if (mp_f32) {
+            if (use_src1) {
+                uint8_t * row_s1 = s1_spad + b * smctx->src1_row_size_aligned;
                 if (smctx->use_f16) {
-                    for (int i = 0; i < ne00; ++i) {
-                        wp0[i] += slope * (float) mp_f16[i];
+                    hvx_scale_f32(row_s0, row_s0, ne00, smctx->scale);
+                    float * r_s0_f = (float *) row_s0;
+                    __fp16 * r_s1_h = (__fp16 *) row_s1;
+                    for (uint32_t i = 0; i < ne00; ++i) {
+                        r_s0_f[i] += slope * (float) r_s1_h[i];
                     }
                 } else {
-                    for (int i = 0; i < ne00; ++i) {
-                        wp0[i] += slope * mp_f32[i];
-                    }
+                    hvx_fast_softmax_prep_f32(row_s0, row_s0, ne00, smctx->scale, row_s1, slope);
                 }
+            } else {
+                hvx_scale_f32(row_s0, row_s0, ne00, smctx->scale);
             }
+
+            hvx_fast_softmax_f32(row_s0, row_d, row_p, ne00);
         }
 
-        if (1 == opt_path) {
-            hvx_fast_softmax_f32((const uint8_t *) wp0, (uint8_t *) dp, (uint8_t *) wp1, ne00);
-        } else {
-            float max = hvx_reduce_max_f32((const uint8_t *) wp0, ne00);
-            float sum = hvx_softmax_f32((const uint8_t *) wp0, (uint8_t *) wp2, (uint8_t *) wp1, ne00, max);
-            sum       = sum > 0.0 ? (1.0 / sum) : 1;
-            hvx_scale_f32((uint8_t *) dp, (const uint8_t *) wp2, ne00, sum);
+        uint8_t * dst_addr = (uint8_t *) dst->data + cm_i3 * nb3 + cm_i2 * nb2 + cm_i1 * nb1;
+        dma_queue_push_vtcm_to_ddr(dma_queue, dma_make_ptr(dst_addr, d_spad),
+                                   smctx->dst_row_size, smctx->dst_row_size_aligned, c_block);
+
+        cm_r += c_block;
+        cm_i1 += c_block;
+        if (cm_i1 >= ne01) {
+            cm_i1 = 0;
+            cm_i2++;
+            if (cm_i2 >= ne02) {
+                cm_i2 = 0;
+                cm_i3++;
+            }
         }
+        cm_rem -= c_block;
     }
+
+    dma_queue_flush(dma_queue);
 
     t2 = HAP_perf_get_qtimer_count();
 
-    FARF(HIGH, "softmax-f32 %d/%d/%d/%d: %ux%ux%ux%u (%u:%u) x %ux%ux%ux%u -> %ux%ux%ux%u usec %u\n", ith, nth,
-         smctx->use_f16, opt_path, ne00, ne01, ne02, ne03, src0_start_row, src0_end_row, ne10, ne11, ne12, ne13,
+    FARF(HIGH, "softmax-f32 %d/%d/%d: %ux%ux%ux%u (%u:%u) x %ux%ux%ux%u -> %ux%ux%ux%u usec %u\n", ith, nth,
+         smctx->use_f16, ne00, ne01, ne02, ne03, src0_start_row, src0_end_row, ne10, ne11, ne12, ne13,
          ne0, ne1, ne2, ne3, (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
 }
 
@@ -358,44 +418,68 @@ static int execute_op_softmax_f32(struct htp_ops_context * octx) {
     const uint32_t n_threads = octx->n_threads;
 
     const size_t src0_row_size = src0->nb[1];
-    const size_t src1_row_size = src0_row_size;
     const size_t dst_row_size  = dst->nb[1];
+    const size_t src1_row_size = (src1->ne[0]) ? src1->nb[1] : 0;
 
-    // VTCM scratchpads for all tensors
-    // N rows per thread, padded to HVX vector size
-    octx->dst_spad.size  = hex_round_up(dst_row_size, 128) * n_threads;
-    octx->src0_spad.size = hex_round_up(src0_row_size, 128) * n_threads;
-    octx->src1_spad.size = hex_round_up(src1_row_size, 128) * n_threads;
+    // Aligned row sizes
+    const size_t src0_row_size_aligned = hex_round_up(src0_row_size, 128);
+    const size_t dst_row_size_aligned  = hex_round_up(dst_row_size, 128);
+    const size_t src1_row_size_aligned = hex_round_up(src1_row_size, 128);
 
-    // Use stride for calculating offset
-    smctx.spad_stride = hex_round_up(src0_row_size, 128);
+    // Calculate spad sizes per thread
+    // src0_spad includes: src0 rows, pad rows (intermediate), and src1 rows (if used)
+    size_t src0_spad_size = HTP_SOFTMAX_SPAD_NROWS * src0_row_size_aligned;
+    size_t pad_spad_size  = HTP_SOFTMAX_SPAD_NROWS * src0_row_size_aligned; // same size as src0
+    size_t src1_spad_size = (src1->ne[0]) ? (HTP_SOFTMAX_SPAD_NROWS * src1_row_size_aligned) : 0;
 
-    size_t spad_size = octx->src0_spad.size + octx->src1_spad.size + octx->dst_spad.size;
+    size_t dst_spad_size  = HTP_SOFTMAX_SPAD_NROWS * dst_row_size_aligned;
+
+    size_t src0_total_per_thread = src0_spad_size + pad_spad_size + src1_spad_size;
+    size_t dst_total_per_thread  = dst_spad_size;
+
+    size_t total_vtcm = (src0_total_per_thread + dst_total_per_thread) * n_threads;
 
     if (src1->ne[0]) {
         FARF(HIGH,
-             "%s: %ux%ux%ux%u x %ux%ux%ux%u -> %ux%ux%ux%u : src0-spad-size %u src1-spad-size %u dst-spad-size %u\n",
+             "%s: %ux%ux%ux%u x %ux%ux%ux%u -> %ux%ux%ux%u : vtcm needed %u\n",
              op_type, src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3], src1->ne[0], src1->ne[1], src1->ne[2],
-             src1->ne[3], dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3], octx->src0_spad.size, octx->src1_spad.size,
-             octx->dst_spad.size);
+             src1->ne[3], dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3], total_vtcm);
     } else {
-        FARF(HIGH, "%s: %ux%ux%ux%u -> %ux%ux%ux%u : src0-spad-size %u src1-spad-size %u dst-spad-size %u\n", op_type,
+        FARF(HIGH, "%s: %ux%ux%ux%u -> %ux%ux%ux%u : vtcm needed %u\n", op_type,
              src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3], dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],
-             octx->src0_spad.size, octx->src1_spad.size, octx->dst_spad.size);
+             total_vtcm);
     }
 
-    // Make sure the reserved vtcm size is sufficient
-    if (octx->ctx->vtcm_size < spad_size) {
+    if (octx->ctx->vtcm_size < total_vtcm) {
         FARF(ERROR, "%s : current VTCM reservation %zu is too small, needed %zu\n", op_type, octx->ctx->vtcm_size,
-             spad_size);
+             total_vtcm);
         return HTP_STATUS_VTCM_TOO_SMALL;
     }
 
+    octx->src0_spad.size_per_thread = src0_total_per_thread;
+    octx->dst_spad.size_per_thread  = dst_total_per_thread;
+    octx->src1_spad.size_per_thread = 0; // Packed into src0
+
+    octx->src0_spad.size = octx->src0_spad.size_per_thread * n_threads;
+    octx->dst_spad.size  = octx->dst_spad.size_per_thread * n_threads;
+    octx->src1_spad.size = 0;
+
     octx->src0_spad.data = octx->ctx->vtcm_base;
-    octx->src1_spad.data = octx->src0_spad.data + octx->src0_spad.size;
-    octx->dst_spad.data  = octx->src1_spad.data + octx->src1_spad.size;
+    octx->src1_spad.data = NULL;
+    octx->dst_spad.data  = octx->src0_spad.data + octx->src0_spad.size;
+
+    smctx.src0_row_size = src0_row_size;
+    smctx.src0_row_size_aligned = src0_row_size_aligned;
+    smctx.dst_row_size = dst_row_size;
+    smctx.dst_row_size_aligned = dst_row_size_aligned;
+    smctx.src1_row_size = src1_row_size;
+    smctx.src1_row_size_aligned = src1_row_size_aligned;
+
+    smctx.spad_pad_offset  = src0_spad_size;
+    smctx.spad_src1_offset = src0_spad_size + pad_spad_size;
 
     uint32_t src0_nrows = src0->ne[1] * src0->ne[2] * src0->ne[3];
+    smctx.src0_nrows = src0_nrows;
 
     if (!(octx->flags & HTP_OPFLAGS_SKIP_COMPUTE)) {
         uint32_t n_jobs             = MIN(n_threads, src0_nrows);
