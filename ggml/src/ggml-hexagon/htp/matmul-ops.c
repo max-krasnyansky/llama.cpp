@@ -1306,8 +1306,145 @@ static inline HVX_Vector_x8 hvx_vec_load_q4_1x4x8(const uint8_t * restrict ptr) 
     HVX_Vector_x8 r = { v0, v1, v2, v3, v4, v5, v6, v7 };
     return r;
 }
+// q8_1x4x2 is similar to q8_0x4x2 but adds precomputed sum for q4_1 dot product optimization
+static inline void quantize_block_f32_q8_1x4(float * restrict x, uint8_t * restrict y_q, uint8_t * restrict y_d, uint8_t * restrict y_s) {
+    assert((unsigned long) x % 128 == 0);
+    assert((unsigned long) y_q % 128 == 0);
 
-static void vec_dot_q4_1x4x2_q8x4x2_1x1(const int n, float * restrict s0, const void * restrict vx0, const void * restrict vy0) {
+    HVX_Vector * vx = (HVX_Vector *) x;
+
+    // Load and convert into QF32
+    HVX_Vector zero   = Q6_V_vsplat_R(0);
+    HVX_Vector vx0_qf = Q6_Vqf32_vsub_VsfVsf(vx[0], zero);  // 32 elements
+    HVX_Vector vx1_qf = Q6_Vqf32_vsub_VsfVsf(vx[1], zero);  // 32 elements
+    HVX_Vector vx2_qf = Q6_Vqf32_vsub_VsfVsf(vx[2], zero);  // 32 elements
+    HVX_Vector vx3_qf = Q6_Vqf32_vsub_VsfVsf(vx[3], zero);  // 32 elements
+
+    // Convert into fp16
+    HVX_Vector vx01_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx1_qf, vx0_qf)));
+    HVX_Vector vx23_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx3_qf, vx2_qf)));
+
+    // Compute max and scale
+    HVX_Vector vmax_hf = hvx_vec_reduce_max_f16(hvx_vec_abs_f16(vx01_hf));
+    vmax_hf            = hvx_vec_reduce_max2_f16(hvx_vec_abs_f16(vx23_hf), vmax_hf);
+
+    // Replicate first fp16 scale across all lanes
+    HVX_Vector ctrl = *(const HVX_Vector *) repl_1x_f16;
+    vmax_hf         = Q6_V_vdelta_VV(vmax_hf, ctrl);
+
+    HVX_Vector vd_qf16 = Q6_Vqf16_vmpy_VhfVhf(vmax_hf, Q6_Vh_vsplat_R(0x2008));  // 1.0 / 127.0
+    HVX_Vector vd_hf   = Q6_Vhf_equals_Vqf16(vd_qf16);
+
+    *(HVX_UVector *) y_d = vd_hf;
+
+    // Divide input by the scale
+    HVX_Vector vd_inv_hf = hvx_vec_inverse_f16(vd_hf);
+    vx01_hf              = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(vx01_hf, vd_inv_hf));
+    vx23_hf              = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(vx23_hf, vd_inv_hf));
+
+    // Convert to int8
+    HVX_Vector vx01_i16 = hvx_vec_i16_from_hf_rnd_sat(vx01_hf);
+    HVX_Vector vx23_i16 = hvx_vec_i16_from_hf_rnd_sat(vx23_hf);
+    HVX_Vector vx_i8    = Q6_Vb_vpack_VhVh_sat(vx23_i16, vx01_i16);
+
+    *(HVX_Vector *) y_q = vx_i8;
+
+    // Compute sum of quants
+    HVX_Vector vsum_i16 = hvx_vec_reduce_sum_i8(vx_i8); // 32x int16 sums (one per 32-elem block, replicated 4x)
+    HVX_Vector vsum_hf  = Q6_Vhf_equals_Vh(vsum_i16);
+
+    // Scale the sum by d (s = d * sum(qs))
+    HVX_Vector vs_qf16 = Q6_Vqf16_vmpy_VhfVhf(vd_hf, vsum_hf);
+    HVX_Vector vs_hf   = Q6_Vhf_equals_Vqf16(vs_qf16);
+
+    *(HVX_UVector *) y_s = vs_hf;
+}
+static inline size_t q8_1x4x2_row_size(uint32_t ne) {
+    const uint32_t qk = QK_Q8_1x4x2;
+    const uint32_t nb = (ne + qk - 1) / qk;
+    // quants + d + s
+    return hex_round_up(ne + nb * 8 * sizeof(__fp16) + nb * 8 * sizeof(__fp16), 128);
+}
+
+// Overrides input x
+static void quantize_row_f32_q8_1x4x2(float * restrict x, uint8_t * restrict y, uint32_t k) {
+    assert(k % 32 == 0);
+    const uint32_t qk = QK_Q8_1x4x2;
+    const uint32_t nb = (k + qk - 1) / qk;
+
+    const uint32_t qrow_size = k;              // int8
+
+    const uint32_t qblk_size = QK_Q8_1x4x2;    // int8
+
+    const uint32_t drow_size = nb * 8 * 2;
+
+    uint8_t * restrict y_q = (y + 0);                    // quants first
+    uint8_t * restrict y_d = (y + qrow_size);            // then scales
+    uint8_t * restrict y_s = (y + qrow_size + drow_size);// then sums
+
+    // We use stack buffers for temporary scale/sum storage to avoid corrupting input x
+    // which shares the same VTCM buffer in the caller.
+    HVX_Vector tmp_d, tmp_s;
+    uint8_t * t_d = (uint8_t *)&tmp_d;
+    uint8_t * t_s = (uint8_t *)&tmp_s;
+
+    for (uint32_t i = 0; i < nb; i++) {
+        // Block 0 (first 128 elements)
+        quantize_block_f32_q8_1x4(x + (i*2 + 0) * qk/2, y_q + (i*2 + 0) * qblk_size/2, t_d, t_s);
+        // Copy 4 fp16 scales (8 bytes) and 4 fp16 sums (8 bytes) to destination
+        // We can't use hvx_copy here efficiently for small sizes, so just memcpy or cast
+        *((uint64_t *)(y_d + (i*8 + 0)*2)) = *((uint64_t *)t_d);
+        *((uint64_t *)(y_s + (i*8 + 0)*2)) = *((uint64_t *)t_s);
+
+        // Block 1 (next 128 elements)
+        quantize_block_f32_q8_1x4(x + (i*2 + 1) * qk/2, y_q + (i*2 + 1) * qblk_size/2, t_d, t_s);
+        *((uint64_t *)(y_d + (i*8 + 4)*2)) = *((uint64_t *)t_d);
+        *((uint64_t *)(y_s + (i*8 + 4)*2)) = *((uint64_t *)t_s);
+    }
+
+// Overrides input x
+}
+
+static void quantize_f32_q8_1x4x2(unsigned int nth, unsigned int ith, void * data) {
+    struct htp_matmul_context * mmctx = data;
+    struct htp_ops_context * octx = mmctx->octx;
+
+    const struct htp_tensor * src = &octx->src1;
+    uint8_t * restrict dst = octx->src1_spad.data;
+    struct htp_spad * spad = &octx->src0_spad;
+    uint32_t nrows_per_thread = mmctx->src1_nrows_per_thread;
+
+    const uint32_t ne0 = src->ne[0];
+    const uint32_t ne1 = src->ne[1];
+    const uint32_t ne2 = src->ne[2];
+    const uint32_t ne3 = src->ne[3];
+
+    const uint32_t nrows = ne1 * ne2 * ne3;                             // total n_rows
+
+    const uint32_t ir_first = nrows_per_thread * ith;                   // first row
+    const uint32_t ir_last  = MIN(ir_first + nrows_per_thread, nrows);  // last row
+
+    const size_t src_row_size = src->nb[1];
+    const size_t dst_row_size = q8_1x4x2_row_size(ne0);
+
+    uint8_t * restrict src_data = (uint8_t *) src->data + (src_row_size * ir_first);
+    uint8_t * restrict dst_data = (uint8_t *) dst + (dst_row_size * ir_first);
+    uint8_t * restrict tmp_data = (uint8_t *) spad->data + (spad->size_per_thread * ith);
+
+    const size_t src_row_size_padded = hex_round_up(src_row_size, QK_Q8_1x4x2 * sizeof(float));
+    memset(tmp_data, 0, src_row_size_padded);  // zero-out temp row data for padding
+
+    for (uint32_t i = ir_first; i < ir_last; ++i) {
+        hex_l2fetch(src_data, src_row_size, src_row_size, 2);
+        hvx_copy_f32_aa(tmp_data, src_data, ne0);
+
+        quantize_row_f32_q8_1x4x2((float *) tmp_data, dst_data, ne0);
+        dst_data += dst_row_size;
+        src_data += src_row_size;
+    }
+}
+
+static void vec_dot_q4_1x4x2_q8_1x4x2_1x1(const int n, float * restrict s0, const void * restrict vx0, const void * restrict vy0) {
     assert(n % 32 == 0);
     assert((unsigned long) vx0 % 128 == 0);
     assert((unsigned long) vy0 % 128 == 0);
@@ -1322,6 +1459,7 @@ static void vec_dot_q4_1x4x2_q8x4x2_1x1(const int n, float * restrict s0, const 
     const uint32_t y_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
     const uint32_t y_qblk_size = qk;                                          // int8
     const uint32_t y_qrow_size = n;                                           // int8 (not padded)
+    const uint32_t y_drow_size = (n / 32) * 2;                                // fp16 (not padded)
 
     const uint8_t * restrict r0_x_q = ((const uint8_t *) vx0 + 0);            // quants first
     const uint8_t * restrict r0_x_d = ((const uint8_t *) vx0 + x_qrow_size);  // then scales
@@ -1329,13 +1467,10 @@ static void vec_dot_q4_1x4x2_q8x4x2_1x1(const int n, float * restrict s0, const 
 
     const uint8_t * restrict y_q = ((const uint8_t *) vy0 + 0);               // quants first
     const uint8_t * restrict y_d = ((const uint8_t *) vy0 + y_qrow_size);     // then scales
+    const uint8_t * restrict y_s = y_d + y_drow_size;                         // then sums
 
     // Row sum (sf)
     HVX_Vector r0_sum = Q6_V_vsplat_R(0);
-
-    // Constant 1s for summing y_q
-    HVX_Vector vones = Q6_Vb_vsplat_R(1);
-    HVX_Vector_x8 ones_x8 = { vones, vones, vones, vones, vones, vones, vones, vones };
 
     const uint32_t nb   = n / qk;
     const uint32_t nloe = n % qk;
@@ -1347,23 +1482,21 @@ static void vec_dot_q4_1x4x2_q8x4x2_1x1(const int n, float * restrict s0, const 
 
         // sum(q * y_q)
         HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(r0_q, vy_q));
-        // sum(y_q)
-        HVX_Vector r0_is = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(ones_x8, vy_q));
 
         HVX_Vector vy_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y_d + i * y_dblk_size));
+        HVX_Vector vy_s = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y_s + i * y_dblk_size));
         HVX_Vector r0_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_d + i * x_dblk_size));
         HVX_Vector r0_m = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_m + i * x_dblk_size));
 
         // scales: d * dy
         HVX_Vector r0_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_d, vy_d)));
-        // mins: m * dy
-        HVX_Vector r0_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy_d)));
+        // mins: m * sy (sy = dy * sum(y_q))
+        HVX_Vector r0_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy_s)));
 
         HVX_Vector r0_fa = Q6_Vqf32_vmpy_VsfVsf(r0_ia, r0_dd);
-        HVX_Vector r0_fb = Q6_Vqf32_vmpy_VsfVsf(r0_is, r0_md);
 
         r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_fa, r0_sum));
-        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_fb, r0_sum));
+        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_ms, r0_sum));
     }
 
     if (nloe) {
@@ -1371,33 +1504,31 @@ static void vec_dot_q4_1x4x2_q8x4x2_1x1(const int n, float * restrict s0, const 
         HVX_Vector_x8 r0_q = hvx_vec_load_q4_1x4x8(r0_x_q + i * x_qblk_size);
 
         HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_nloe(r0_q, vy_q, nloe));
-        HVX_Vector r0_is = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_nloe(ones_x8, vy_q, nloe));
 
         HVX_Vector vy_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y_d + i * y_dblk_size));
+        HVX_Vector vy_s = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y_s + i * y_dblk_size));
         HVX_Vector r0_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_d + i * x_dblk_size));
         HVX_Vector r0_m = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_m + i * x_dblk_size));
 
         HVX_Vector r0_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_d, vy_d)));
-        HVX_Vector r0_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy_d)));
+        HVX_Vector r0_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy_s)));
 
         HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe / 8);
         r0_dd                = Q6_V_vand_QV(bmask, r0_dd);
-        r0_md                = Q6_V_vand_QV(bmask, r0_md);
+        r0_ms                = Q6_V_vand_QV(bmask, r0_ms);
         r0_ia                = Q6_V_vand_QV(bmask, r0_ia);
-        r0_is                = Q6_V_vand_QV(bmask, r0_is);
 
         HVX_Vector r0_fa = Q6_Vqf32_vmpy_VsfVsf(r0_ia, r0_dd);
-        HVX_Vector r0_fb = Q6_Vqf32_vmpy_VsfVsf(r0_is, r0_md);
 
         r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_fa, r0_sum));
-        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_fb, r0_sum));
+        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_ms, r0_sum));
     }
 
     r0_sum = hvx_vec_reduce_sum_f32(r0_sum);
     hvx_vec_store_u(s0, 4, r0_sum);
 }
 
-static void vec_dot_q4_1x4x2_q8x4x2_2x1(const int n, float * restrict s0,
+static void vec_dot_q4_1x4x2_q8_1x4x2_2x1(const int n, float * restrict s0,
                                       const void * restrict vx0, const void * restrict vx1,
                                       const void * restrict vy0) {
     assert(n % 32 == 0);
@@ -1415,6 +1546,7 @@ static void vec_dot_q4_1x4x2_q8x4x2_2x1(const int n, float * restrict s0,
     const uint32_t y_dblk_size = 8 * 4 * 2;
     const uint32_t y_qblk_size = qk;
     const uint32_t y_qrow_size = n;
+    const uint32_t y_drow_size = (n / 32) * 2;
 
     const uint8_t * restrict r0_x_q = ((const uint8_t *) vx0) + 0;
     const uint8_t * restrict r0_x_d = ((const uint8_t *) vx0) + x_qrow_size;
@@ -1426,12 +1558,10 @@ static void vec_dot_q4_1x4x2_q8x4x2_2x1(const int n, float * restrict s0,
 
     const uint8_t * restrict y_q = ((const uint8_t *) vy0 + 0);
     const uint8_t * restrict y_d = ((const uint8_t *) vy0 + y_qrow_size);
+    const uint8_t * restrict y_s = y_d + y_drow_size;
 
     HVX_Vector r0_sum = Q6_V_vsplat_R(0);
     HVX_Vector r1_sum = Q6_V_vsplat_R(0);
-
-    HVX_Vector vones = Q6_Vb_vsplat_R(1);
-    HVX_Vector_x8 ones_x8 = { vones, vones, vones, vones, vones, vones, vones, vones };
 
     const uint32_t nb   = n / qk;
     const uint32_t nloe = n % qk;
@@ -1444,29 +1574,26 @@ static void vec_dot_q4_1x4x2_q8x4x2_2x1(const int n, float * restrict s0,
 
         HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(r0_q, vy_q));
         HVX_Vector r1_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(r1_q, vy_q));
-        HVX_Vector r0_is = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(ones_x8, vy_q));
-        HVX_Vector r1_is = r0_is; // reuse
 
         HVX_Vector vy_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y_d + i * y_dblk_size));
+        HVX_Vector vy_s = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y_s + i * y_dblk_size));
         HVX_Vector r0_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_d + i * x_dblk_size));
         HVX_Vector r0_m = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_m + i * x_dblk_size));
         HVX_Vector r1_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r1_x_d + i * x_dblk_size));
         HVX_Vector r1_m = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r1_x_m + i * x_dblk_size));
 
         HVX_Vector r0_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_d, vy_d)));
-        HVX_Vector r0_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy_d)));
+        HVX_Vector r0_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy_s)));
         HVX_Vector r1_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_d, vy_d)));
-        HVX_Vector r1_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_m, vy_d)));
+        HVX_Vector r1_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_m, vy_s)));
 
         HVX_Vector r0_fa = Q6_Vqf32_vmpy_VsfVsf(r0_ia, r0_dd);
-        HVX_Vector r0_fb = Q6_Vqf32_vmpy_VsfVsf(r0_is, r0_md);
         HVX_Vector r1_fa = Q6_Vqf32_vmpy_VsfVsf(r1_ia, r1_dd);
-        HVX_Vector r1_fb = Q6_Vqf32_vmpy_VsfVsf(r1_is, r1_md);
 
         r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_fa, r0_sum));
-        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_fb, r0_sum));
+        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_ms, r0_sum));
         r1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_fa, r1_sum));
-        r1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_fb, r1_sum));
+        r1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_ms, r1_sum));
     }
 
     if (nloe) {
@@ -1476,42 +1603,39 @@ static void vec_dot_q4_1x4x2_q8x4x2_2x1(const int n, float * restrict s0,
 
         HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_nloe(r0_q, vy_q, nloe));
         HVX_Vector r1_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_nloe(r1_q, vy_q, nloe));
-        HVX_Vector r0_is = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_nloe(ones_x8, vy_q, nloe));
-        HVX_Vector r1_is = r0_is;
 
         HVX_Vector vy_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y_d + i * y_dblk_size));
+        HVX_Vector vy_s = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y_s + i * y_dblk_size));
         HVX_Vector r0_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_d + i * x_dblk_size));
         HVX_Vector r0_m = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_m + i * x_dblk_size));
         HVX_Vector r1_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r1_x_d + i * x_dblk_size));
         HVX_Vector r1_m = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r1_x_m + i * x_dblk_size));
 
         HVX_Vector r0_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_d, vy_d)));
-        HVX_Vector r0_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy_d)));
+        HVX_Vector r0_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy_s)));
         HVX_Vector r1_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_d, vy_d)));
-        HVX_Vector r1_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_m, vy_d)));
+        HVX_Vector r1_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_m, vy_s)));
 
         HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe / 8);
-        r0_dd = Q6_V_vand_QV(bmask, r0_dd); r0_md = Q6_V_vand_QV(bmask, r0_md);
-        r1_dd = Q6_V_vand_QV(bmask, r1_dd); r1_md = Q6_V_vand_QV(bmask, r1_md);
-        r0_ia = Q6_V_vand_QV(bmask, r0_ia); r0_is = Q6_V_vand_QV(bmask, r0_is);
-        r1_ia = Q6_V_vand_QV(bmask, r1_ia); r1_is = Q6_V_vand_QV(bmask, r1_is);
+        r0_dd = Q6_V_vand_QV(bmask, r0_dd); r0_ms = Q6_V_vand_QV(bmask, r0_ms);
+        r1_dd = Q6_V_vand_QV(bmask, r1_dd); r1_ms = Q6_V_vand_QV(bmask, r1_ms);
+        r0_ia = Q6_V_vand_QV(bmask, r0_ia);
+        r1_ia = Q6_V_vand_QV(bmask, r1_ia);
 
         HVX_Vector r0_fa = Q6_Vqf32_vmpy_VsfVsf(r0_ia, r0_dd);
-        HVX_Vector r0_fb = Q6_Vqf32_vmpy_VsfVsf(r0_is, r0_md);
         HVX_Vector r1_fa = Q6_Vqf32_vmpy_VsfVsf(r1_ia, r1_dd);
-        HVX_Vector r1_fb = Q6_Vqf32_vmpy_VsfVsf(r1_is, r1_md);
 
         r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_fa, r0_sum));
-        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_fb, r0_sum));
+        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_ms, r0_sum));
         r1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_fa, r1_sum));
-        r1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_fb, r1_sum));
+        r1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_ms, r1_sum));
     }
 
     HVX_Vector rsum = hvx_vec_reduce_sum_f32x2(r0_sum, r1_sum);
     hvx_vec_store_u(s0, 8, rsum);
 }
 
-static void vec_dot_q4_1x4x2_q8x4x2_2x2(const int n, float * restrict s0, float * restrict s1,
+static void vec_dot_q4_1x4x2_q8_1x4x2_2x2(const int n, float * restrict s0, float * restrict s1,
                                         const void * restrict vx0, const void * restrict vx1,
                                         const void * restrict vy0, const void * restrict vy1) {
     assert(n % 32 == 0);
@@ -1530,6 +1654,7 @@ static void vec_dot_q4_1x4x2_q8x4x2_2x2(const int n, float * restrict s0, float 
     const uint32_t y_dblk_size = 8 * 4 * 2;
     const uint32_t y_qblk_size = qk;
     const uint32_t y_qrow_size = n;
+    const uint32_t y_drow_size = (n / 32) * 2;
 
     const uint8_t * restrict r0_x_q = ((const uint8_t *) vx0) + 0;
     const uint8_t * restrict r0_x_d = ((const uint8_t *) vx0) + x_qrow_size;
@@ -1541,16 +1666,15 @@ static void vec_dot_q4_1x4x2_q8x4x2_2x2(const int n, float * restrict s0, float 
 
     const uint8_t * restrict y0_q = ((const uint8_t *) vy0) + 0;
     const uint8_t * restrict y0_d = ((const uint8_t *) vy0) + y_qrow_size;
+    const uint8_t * restrict y0_s = y0_d + y_drow_size;
     const uint8_t * restrict y1_q = ((const uint8_t *) vy1) + 0;
     const uint8_t * restrict y1_d = ((const uint8_t *) vy1) + y_qrow_size;
+    const uint8_t * restrict y1_s = y1_d + y_drow_size;
 
     HVX_Vector r0_c0_sum = Q6_V_vsplat_R(0);
     HVX_Vector r0_c1_sum = Q6_V_vsplat_R(0);
     HVX_Vector r1_c0_sum = Q6_V_vsplat_R(0);
     HVX_Vector r1_c1_sum = Q6_V_vsplat_R(0);
-
-    HVX_Vector vones = Q6_Vb_vsplat_R(1);
-    HVX_Vector_x8 ones_x8 = { vones, vones, vones, vones, vones, vones, vones, vones };
 
     const uint32_t nb   = n / qk;
     const uint32_t nloe = n % qk;
@@ -1567,40 +1691,39 @@ static void vec_dot_q4_1x4x2_q8x4x2_2x2(const int n, float * restrict s0, float 
         HVX_Vector r1_c0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(r1_q, vy0_q));
         HVX_Vector r1_c1_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(r1_q, vy1_q));
 
-        HVX_Vector c0_is = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(ones_x8, vy0_q));
-        HVX_Vector c1_is = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(ones_x8, vy1_q));
-
         HVX_Vector vy0_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y0_d + i * y_dblk_size));
+        HVX_Vector vy0_s = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y0_s + i * y_dblk_size));
         HVX_Vector vy1_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y1_d + i * y_dblk_size));
+        HVX_Vector vy1_s = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y1_s + i * y_dblk_size));
         HVX_Vector r0_d  = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_d + i * x_dblk_size));
         HVX_Vector r0_m  = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_m + i * x_dblk_size));
         HVX_Vector r1_d  = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r1_x_d + i * x_dblk_size));
         HVX_Vector r1_m  = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r1_x_m + i * x_dblk_size));
 
         HVX_Vector r0_c0_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_d, vy0_d)));
-        HVX_Vector r0_c0_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy0_d)));
+        HVX_Vector r0_c0_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy0_s)));
 
         HVX_Vector r0_c1_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_d, vy1_d)));
-        HVX_Vector r0_c1_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy1_d)));
+        HVX_Vector r0_c1_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy1_s)));
 
         HVX_Vector r1_c0_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_d, vy0_d)));
-        HVX_Vector r1_c0_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_m, vy0_d)));
+        HVX_Vector r1_c0_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_m, vy0_s)));
 
         HVX_Vector r1_c1_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_d, vy1_d)));
-        HVX_Vector r1_c1_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_m, vy1_d)));
+        HVX_Vector r1_c1_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_m, vy1_s)));
 
         // Accumulate
         r0_c0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(Q6_Vqf32_vmpy_VsfVsf(r0_c0_ia, r0_c0_dd), r0_c0_sum));
-        r0_c0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(Q6_Vqf32_vmpy_VsfVsf(c0_is,    r0_c0_md), r0_c0_sum));
+        r0_c0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_c0_ms, r0_c0_sum));
 
         r0_c1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(Q6_Vqf32_vmpy_VsfVsf(r0_c1_ia, r0_c1_dd), r0_c1_sum));
-        r0_c1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(Q6_Vqf32_vmpy_VsfVsf(c1_is,    r0_c1_md), r0_c1_sum));
+        r0_c1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_c1_ms, r0_c1_sum));
 
         r1_c0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(Q6_Vqf32_vmpy_VsfVsf(r1_c0_ia, r1_c0_dd), r1_c0_sum));
-        r1_c0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(Q6_Vqf32_vmpy_VsfVsf(c0_is,    r1_c0_md), r1_c0_sum));
+        r1_c0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_c0_ms, r1_c0_sum));
 
         r1_c1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(Q6_Vqf32_vmpy_VsfVsf(r1_c1_ia, r1_c1_dd), r1_c1_sum));
-        r1_c1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(Q6_Vqf32_vmpy_VsfVsf(c1_is,    r1_c1_md), r1_c1_sum));
+        r1_c1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_c1_ms, r1_c1_sum));
     }
 
     if (nloe) {
@@ -1614,70 +1737,61 @@ static void vec_dot_q4_1x4x2_q8x4x2_2x2(const int n, float * restrict s0, float 
         HVX_Vector r1_c0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_nloe(r1_q, vy0_q, nloe));
         HVX_Vector r1_c1_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_nloe(r1_q, vy1_q, nloe));
 
-        HVX_Vector c0_is = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_nloe(ones_x8, vy0_q, nloe));
-        HVX_Vector c1_is = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_nloe(ones_x8, vy1_q, nloe));
-
         HVX_Vector vy0_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y0_d + i * y_dblk_size));
+        HVX_Vector vy0_s = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y0_s + i * y_dblk_size));
         HVX_Vector vy1_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y1_d + i * y_dblk_size));
+        HVX_Vector vy1_s = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y1_s + i * y_dblk_size));
         HVX_Vector r0_d  = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_d + i * x_dblk_size));
         HVX_Vector r0_m  = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_m + i * x_dblk_size));
         HVX_Vector r1_d  = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r1_x_d + i * x_dblk_size));
         HVX_Vector r1_m  = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r1_x_m + i * x_dblk_size));
 
         HVX_Vector r0_c0_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_d, vy0_d)));
-        HVX_Vector r0_c0_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy0_d)));
+        HVX_Vector r0_c0_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy0_s)));
 
         HVX_Vector r0_c1_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_d, vy1_d)));
-        HVX_Vector r0_c1_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy1_d)));
+        HVX_Vector r0_c1_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy1_s)));
 
         HVX_Vector r1_c0_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_d, vy0_d)));
-        HVX_Vector r1_c0_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_m, vy0_d)));
+        HVX_Vector r1_c0_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_m, vy0_s)));
 
         HVX_Vector r1_c1_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_d, vy1_d)));
-        HVX_Vector r1_c1_md = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_m, vy1_d)));
+        HVX_Vector r1_c1_ms = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r1_m, vy1_s)));
 
         HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe / 8);
-        r0_c0_dd = Q6_V_vand_QV(bmask, r0_c0_dd); r0_c0_md = Q6_V_vand_QV(bmask, r0_c0_md);
-        r0_c1_dd = Q6_V_vand_QV(bmask, r0_c1_dd); r0_c1_md = Q6_V_vand_QV(bmask, r0_c1_md);
-        r1_c0_dd = Q6_V_vand_QV(bmask, r1_c0_dd); r1_c0_md = Q6_V_vand_QV(bmask, r1_c0_md);
-        r1_c1_dd = Q6_V_vand_QV(bmask, r1_c1_dd); r1_c1_md = Q6_V_vand_QV(bmask, r1_c1_md);
-        r0_c0_ia = Q6_V_vand_QV(bmask, r0_c0_ia); c0_is = Q6_V_vand_QV(bmask, c0_is);
-        r0_c1_ia = Q6_V_vand_QV(bmask, r0_c1_ia); c1_is = Q6_V_vand_QV(bmask, c1_is);
+        r0_c0_dd = Q6_V_vand_QV(bmask, r0_c0_dd); r0_c0_ms = Q6_V_vand_QV(bmask, r0_c0_ms);
+        r0_c1_dd = Q6_V_vand_QV(bmask, r0_c1_dd); r0_c1_ms = Q6_V_vand_QV(bmask, r0_c1_ms);
+        r1_c0_dd = Q6_V_vand_QV(bmask, r1_c0_dd); r1_c0_ms = Q6_V_vand_QV(bmask, r1_c0_ms);
+        r1_c1_dd = Q6_V_vand_QV(bmask, r1_c1_dd); r1_c1_ms = Q6_V_vand_QV(bmask, r1_c1_ms);
+        r0_c0_ia = Q6_V_vand_QV(bmask, r0_c0_ia);
+        r0_c1_ia = Q6_V_vand_QV(bmask, r0_c1_ia);
         r1_c0_ia = Q6_V_vand_QV(bmask, r1_c0_ia);
         r1_c1_ia = Q6_V_vand_QV(bmask, r1_c1_ia);
 
         HVX_Vector r0_c0_fa = Q6_Vqf32_vmpy_VsfVsf(r0_c0_ia, r0_c0_dd);
-        HVX_Vector r0_c0_fb = Q6_Vqf32_vmpy_VsfVsf(c0_is,    r0_c0_md);
-
         HVX_Vector r0_c1_fa = Q6_Vqf32_vmpy_VsfVsf(r0_c1_ia, r0_c1_dd);
-        HVX_Vector r0_c1_fb = Q6_Vqf32_vmpy_VsfVsf(c1_is,    r0_c1_md);
-
         HVX_Vector r1_c0_fa = Q6_Vqf32_vmpy_VsfVsf(r1_c0_ia, r1_c0_dd);
-        HVX_Vector r1_c0_fb = Q6_Vqf32_vmpy_VsfVsf(c0_is,    r1_c0_md);
-
         HVX_Vector r1_c1_fa = Q6_Vqf32_vmpy_VsfVsf(r1_c1_ia, r1_c1_dd);
-        HVX_Vector r1_c1_fb = Q6_Vqf32_vmpy_VsfVsf(c1_is,    r1_c1_md);
 
         r0_c0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_c0_fa, r0_c0_sum));
-        r0_c0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_c0_fb, r0_c0_sum));
+        r0_c0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_c0_ms, r0_c0_sum));
 
         r0_c1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_c1_fa, r0_c1_sum));
-        r0_c1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_c1_fb, r0_c1_sum));
+        r0_c1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_c1_ms, r0_c1_sum));
 
         r1_c0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_c0_fa, r1_c0_sum));
-        r1_c0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_c0_fb, r1_c0_sum));
+        r1_c0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_c0_ms, r1_c0_sum));
 
         r1_c1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_c1_fa, r1_c1_sum));
-        r1_c1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_c1_fb, r1_c1_sum));
+        r1_c1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_c1_ms, r1_c1_sum));
     }
 
     HVX_Vector r0_r1_c0_sum = hvx_vec_reduce_sum_f32x2(r0_c0_sum, r1_c0_sum);
     HVX_Vector r0_r1_c1_sum = hvx_vec_reduce_sum_f32x2(r0_c1_sum, r1_c1_sum);
 
-    hvx_vec_store_u(&s0[0], 8, r0_r1_c0_sum);  // row0,col0 row1,col0
-    hvx_vec_store_u(&s1[0], 8, r0_r1_c1_sum);  // row0,col1 row1,col1
+    hvx_vec_store_u(s0, 8, r0_r1_c0_sum);  // row0,col0 row1,col0
+    hvx_vec_store_u(s1, 8, r0_r1_c1_sum);  // row0,col1 row1,col1
 }
-
 static void vec_dot_f16_f16_aa_1x1(const int n, float * restrict s, const void * restrict vx, const void * restrict vy) {
     const HVX_Vector * restrict x = (const HVX_Vector *) vx;
     const HVX_Vector * restrict y = (const HVX_Vector *) vy;
@@ -2779,9 +2893,9 @@ static int htp_mminit_vec_dot(struct htp_matmul_context * mmctx, enum htp_data_t
             return 0;
         case HTP_TYPE_Q4_1:
             mmctx->type        = "q4_1x4x2-f32";
-            mmctx->vec_dot_1x1 = vec_dot_q4_1x4x2_q8x4x2_1x1;
-            mmctx->vec_dot_2x1 = vec_dot_q4_1x4x2_q8x4x2_2x1;
-            mmctx->vec_dot_2x2 = vec_dot_q4_1x4x2_q8x4x2_2x2;
+            mmctx->vec_dot_1x1 = vec_dot_q4_1x4x2_q8_1x4x2_1x1;
+            mmctx->vec_dot_2x1 = vec_dot_q4_1x4x2_q8_1x4x2_2x1;
+            mmctx->vec_dot_2x2 = vec_dot_q4_1x4x2_q8_1x4x2_2x2;
             return 0;
         case HTP_TYPE_Q8_0:
             mmctx->type        = "q8x4x2-f32";
@@ -2816,7 +2930,9 @@ static void htp_mminit_spad(struct htp_ops_context * octx,
     }
 
     // src0 spad is also used in dynamic quantizer to store padded src1 rows
-    size_t src1_row_size_padded = hex_round_up(src1_row_size, QK_Q8_0x4x2 * sizeof(float));
+    // Q8_1 row size is larger than Q8_0 so we use Q8_1 constant to be safe
+    // We pad to 1024 bytes (4 * 256) to allow safe 4x unrolled vector loading in dot kernels
+    size_t src1_row_size_padded = hex_round_up(src1_row_size + 1024, QK_Q8_1x4x2 * sizeof(float));
     if (octx->src0_spad.size_per_thread < src1_row_size_padded) {
         octx->src0_spad.size_per_thread = src1_row_size_padded;
     }
@@ -2878,7 +2994,9 @@ int op_matmul(struct htp_ops_context * octx) {
 
             octx->dst_spad.size_per_thread  = hex_round_up(MM_SPAD_DST_NROWS * dst_row_size, 256);
             octx->src0_spad.size_per_thread = hex_round_up(MM_SPAD_SRC0_NROWS * src0_row_size_padded, 256);
-            octx->src1_spad.size_per_thread = hex_round_up(src1_row_size * src1_nrows, 256);
+    // We add 1024 bytes of padding at the end of src1_spad to allow safe speculative
+    // loading of 4x vectors (1024 bytes) in the dot product kernels, even for the last block.
+    octx->src1_spad.size_per_thread = hex_round_up(src1_row_size * src1_nrows + 1024, 256);
 
             octx->src1_spad.size = octx->src1_spad.size_per_thread;
             octx->src0_spad.size = octx->src0_spad.size_per_thread * octx->n_threads;
@@ -2919,8 +3037,13 @@ int op_matmul(struct htp_ops_context * octx) {
             return HTP_STATUS_NO_SUPPORT;
         }
 
-        quant_job_func = quantize_f32_q8x4x2;
-        src1_row_size  = q8x4x2_row_size(ne10);
+        if (src0->type == HTP_TYPE_Q4_1) {
+            quant_job_func = quantize_f32_q8_1x4x2;
+            src1_row_size  = q8_1x4x2_row_size(ne10);
+        } else {
+            quant_job_func = quantize_f32_q8x4x2;
+            src1_row_size  = q8x4x2_row_size(ne10);
+        }
         htp_mminit_spad(octx, dst_row_size, src0_row_size_padded, src1_row_size, src1_nrows, 0);
     }
 
