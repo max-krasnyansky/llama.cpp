@@ -35,6 +35,7 @@ enum htp_data_type {
     HTP_TYPE_F32   = 0,
     HTP_TYPE_F16   = 1,
     HTP_TYPE_Q4_0  = 2,
+    HTP_TYPE_Q4_1  = 3,
     HTP_TYPE_Q8_0  = 8,
     HTP_TYPE_I32   = 26,
     HTP_TYPE_I64   = 27,
@@ -79,6 +80,8 @@ static inline size_t htp_t_block_size(uint32_t t) {
             return 1;
         case HTP_TYPE_Q4_0:
             return QK4_0;
+        case HTP_TYPE_Q4_1:
+            return QK4_1;
         case HTP_TYPE_Q8_0:
             return QK8_0;
         case HTP_TYPE_MXFP4:
@@ -97,6 +100,8 @@ static inline size_t htp_type_nbytes(uint32_t t) {
             return 2;
         case HTP_TYPE_Q4_0:
             return sizeof(block_q4_0);
+        case HTP_TYPE_Q4_1:
+            return sizeof(block_q4_1);
         case HTP_TYPE_Q8_0:
             return sizeof(block_q8_0);
         case HTP_TYPE_MXFP4:
@@ -109,6 +114,7 @@ static inline size_t htp_type_nbytes(uint32_t t) {
 
 // Internal types
 #define QK_Q4_0x4x2  256  // 4x Q4_0 blocks packed with next 4x Q4_0 blocks (size in bytes 128)
+#define QK_Q4_1x4x2  256  // 4x Q4_1 blocks packed with next 4x Q4_1 blocks (size in bytes 128)
 #define QK_Q8_0x4x2  256  // 4x Q8_0 blocks concat with next 4x Q8_0 blocks
 #define QK_MXFP4x4x2 256  // 4x MXFP4 blocks concat with next 4x MXFP4 blocks
 
