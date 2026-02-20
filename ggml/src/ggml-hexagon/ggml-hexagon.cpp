@@ -1749,23 +1749,6 @@ static inline bool ggml_backend_buffer_is_hexagon_repack(const struct ggml_backe
     return b->buft->iface.alloc_buffer == ggml_backend_hexagon_repack_buffer_type_alloc_buffer;
 }
 
-static bool hex_supported_dims2(const struct ggml_tensor * x, const struct ggml_tensor * y) {
-    if (x->ne[0] != y->ne[0]) {
-        return false;
-    }
-    if (x->ne[1] != y->ne[1]) {
-        return false;
-    }
-    if (x->ne[2] != y->ne[2]) {
-        return false;
-    }
-    if (x->ne[3] != y->ne[3]) {
-        return false;
-    }
-
-    return true;
-}
-
 static bool ggml_hexagon_supported_flash_attn_ext(const struct ggml_hexagon_session * sess, const struct ggml_tensor * op) {
     const struct ggml_tensor * src0 = op->src[0];
     const struct ggml_tensor * src1 = op->src[1];
@@ -1891,7 +1874,7 @@ static bool ggml_hexagon_supported_binary(const struct ggml_hexagon_session * se
     if (dst->type != GGML_TYPE_F32) {
         return false;
     }
-    if (!hex_supported_dims2(src0, dst)) {
+    if (!ggml_are_same_shape(src0, dst)) {
         return false;
     }
     if (!ggml_can_repeat(src1, src0)) {
@@ -1915,7 +1898,7 @@ static bool ggml_hexagon_supported_add_id(const struct ggml_hexagon_session * se
     if (dst->type != GGML_TYPE_F32) {
         return false;
     }
-    if (!hex_supported_dims2(src0, dst)) {
+    if (!ggml_are_same_shape(src0, dst)) {
         return false;
     }
 
@@ -1937,7 +1920,7 @@ static bool ggml_hexagon_supported_unary(const struct ggml_hexagon_session * ses
     if (dst->type != GGML_TYPE_F32) {
         return false;
     }
-    if (!hex_supported_dims2(src0, dst)) {
+    if (!ggml_are_same_shape(src0, dst)) {
         return false;
     }
 
@@ -1989,7 +1972,7 @@ static bool ggml_hexagon_supported_activations(const struct ggml_hexagon_session
         if (src1->type != GGML_TYPE_F32) {
             return false;
         }
-        if (!hex_supported_dims2(src0, src1)) {
+        if (!ggml_are_same_shape(src0, src1)) {
             return false;
         }
         if (!ggml_is_contiguous(src1)) {
