@@ -63,6 +63,10 @@ struct htp_softmax_context {
     float m0;
     float m1;
 
+    struct fastdiv_values fastdiv_ne11;
+    struct fastdiv_values fastdiv_ne12;
+    struct fastdiv_values fastdiv_ne13;
+
     struct htp_ops_context * octx;
 
     size_t src0_row_size;
@@ -95,6 +99,12 @@ static void init_softmax_ctx(struct htp_softmax_context * smctx, struct htp_ops_
 
     smctx->use_src1 = (src1->ne[0] != 0);
     smctx->use_f16  = (src1->ne[0] != 0) && (src1->type == HTP_TYPE_F16);
+
+    if (smctx->use_src1) {
+        if (src1->ne[1] > 0) smctx->fastdiv_ne11 = init_fastdiv_values(src1->ne[1]);
+        if (src1->ne[2] > 0) smctx->fastdiv_ne12 = init_fastdiv_values(src1->ne[2]);
+        if (src1->ne[3] > 0) smctx->fastdiv_ne13 = init_fastdiv_values(src1->ne[3]);
+    }
 
     smctx->octx = octx;
 
@@ -277,9 +287,9 @@ static void softmax_job_f32(unsigned int nth, unsigned int ith, void * data) {
              size_t s1_stride = 0;
 
              if (use_src1) {
-                 uint32_t i12 = (ne12 == ne02) ? pf_i2 : (pf_i2 % ne12);
-                 uint32_t i13 = (ne13 == ne03) ? pf_i3 : (pf_i3 % ne13);
-                 uint32_t i11 = (ne11 == ne01) ? pf_i1 : (pf_i1 % ne11);
+                 uint32_t i12 = (ne12 == ne02) ? pf_i2 : fastmodulo(pf_i2, ne12, &smctx->fastdiv_ne12);
+                 uint32_t i13 = (ne13 == ne03) ? pf_i3 : fastmodulo(pf_i3, ne13, &smctx->fastdiv_ne13);
+                 uint32_t i11 = (ne11 == ne01) ? pf_i1 : fastmodulo(pf_i1, ne11, &smctx->fastdiv_ne11);
 
                  s1_addr = (const uint8_t *) src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11;
                  s1_spad = src0_spad_base_ptr + smctx->spad_src1_offset + pf_slot * smctx->src1_row_size_aligned;
