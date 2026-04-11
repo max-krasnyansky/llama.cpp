@@ -452,7 +452,7 @@ static void vec_dot_q4x4x2_q8x4x2_1x1(const int n, float * restrict s0, const vo
     // Process leftovers
     if (nloe) {
         HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_partial(y_q    + i * y_qblk_size, nloe);
-        HVX_Vector_x8 r0_q = hvx_vec_load_q4x4x8_partial(r0_x_q + i * x_qblk_size, nloe);
+        HVX_Vector_x8 r0_q = hvx_vec_load_q4x4x8_full(r0_x_q + i * x_qblk_size);
 
         HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_partial(r0_q, vy_q, nloe));
 
@@ -539,7 +539,7 @@ static void vec_dot_q4x4x2_q8x4x2_2x1(const int n, float * restrict s0,
     // Process leftovers
     if (nloe) {
         HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_partial(y_q    + i * y_qblk_size, nloe);
-        HVX_Vector_x8 r0_q = hvx_vec_load_q4x4x8_partial(r0_x_q + i * x_qblk_size, nloe);
+        HVX_Vector_x8 r0_q = hvx_vec_load_q4x4x8_full(r0_x_q + i * x_qblk_size);
         HVX_Vector_x8 r1_q = hvx_vec_load_q4x4x8_partial(r1_x_q + i * x_qblk_size, nloe);
 
         HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_partial(r0_q, vy_q, nloe));
@@ -652,7 +652,7 @@ static void vec_dot_q4x4x2_q8x4x2_2x2(const int n, float * restrict s0, float * 
     if (nloe) {
         HVX_Vector_x8 vy0_q = hvx_vec_load_q8x4x8_partial(y0_q   + i * y_qblk_size, nloe);
         HVX_Vector_x8 vy1_q = hvx_vec_load_q8x4x8_partial(y1_q   + i * y_qblk_size, nloe);
-        HVX_Vector_x8 r0_q  = hvx_vec_load_q4x4x8_partial(r0_x_q + i * x_qblk_size, nloe);
+        HVX_Vector_x8 r0_q  = hvx_vec_load_q4x4x8_full(r0_x_q + i * x_qblk_size);
         HVX_Vector_x8 r1_q  = hvx_vec_load_q4x4x8_partial(r1_x_q + i * x_qblk_size, nloe);
 
         HVX_Vector r0_c0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_partial(r0_q, vy0_q, nloe));
@@ -1053,8 +1053,8 @@ static void vec_dot_q4kx2_q8x4x2_1x1(const int n, float * restrict s0, const voi
     }
 
     if (nloe) {
-        HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_partial(y_q + i * y_qblk_size, nloe);
-        HVX_Vector_x8 r0_q = hvx_vec_load_q4x4x8_partial(r0_x_q + i * x_qblk_size, nloe);
+        HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_full(y_q + i * y_qblk_size);
+        HVX_Vector_x8 r0_q = hvx_vec_load_q4x4x8_full(r0_x_q + i * x_qblk_size);
 
         HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(r0_q, vy_q));
         HVX_Vector sum_y = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(ones, vy_q));
@@ -1087,14 +1087,14 @@ static void vec_dot_q4kx2_q8x4x2_1x1(const int n, float * restrict s0, const voi
     *s0 += s;
 }
 
-static void vec_dot_q4kx2_q8x4x2_2x1(const int n, float * restrict s0, float * restrict s1, const void * restrict vx0, const void * restrict vx1, const void * restrict vy0) {
-    vec_dot_q4kx2_q8x4x2_1x1(n, s0, vx0, vy0);
-    vec_dot_q4kx2_q8x4x2_1x1(n, s1, vx1, vy0);
+static void vec_dot_q4kx2_q8x4x2_2x1(const int n, float * restrict s0, const void * restrict vx0, const void * restrict vx1, const void * restrict vy0) {
+    vec_dot_q4kx2_q8x4x2_1x1(n, &s0[0], vx0, vy0);
+    vec_dot_q4kx2_q8x4x2_1x1(n, &s0[1], vx1, vy0);
 }
 
 static void vec_dot_q4kx2_q8x4x2_2x2(const int n, float * restrict s0, float * restrict s1, const void * restrict vx0, const void * restrict vx1, const void * restrict vy0, const void * restrict vy1) {
-    vec_dot_q4kx2_q8x4x2_2x1(n, &s0[0], &s1[0], vx0, vx1, vy0);
-    vec_dot_q4kx2_q8x4x2_2x1(n, &s0[1], &s1[1], vx0, vx1, vy1);
+    vec_dot_q4kx2_q8x4x2_2x1(n, s0, vx0, vx1, vy0);
+    vec_dot_q4kx2_q8x4x2_2x1(n, s1, vx0, vx1, vy1);
 }
 
 // ======== IQ4_NL x Q8_0 vec_dot kernels ========
@@ -1148,7 +1148,7 @@ static void vec_dot_iq4nlx4x2_q8x4x2_1x1(const int n,
     }
 
     if (nloe) {
-        HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_partial(y_q + i * y_qblk_size, nloe);
+        HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_full(y_q + i * y_qblk_size);
         HVX_Vector_x8 r0_q = hvx_vec_load_iq4nlx4x8_partial(r0_x_q + i * x_qblk_size, nloe);
 
         HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_partial(r0_q, vy_q, nloe));
@@ -1230,7 +1230,7 @@ static void vec_dot_iq4nlx4x2_q8x4x2_2x1(const int n,
     }
 
     if (nloe) {
-        HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_partial(y_q + i * y_qblk_size, nloe);
+        HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_full(y_q + i * y_qblk_size);
         HVX_Vector_x8 r0_q = hvx_vec_load_iq4nlx4x8_partial(r0_x_q + i * x_qblk_size, nloe);
         HVX_Vector_x8 r1_q = hvx_vec_load_iq4nlx4x8_partial(r1_x_q + i * x_qblk_size, nloe);
 
