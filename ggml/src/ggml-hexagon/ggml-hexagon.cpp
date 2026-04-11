@@ -529,6 +529,127 @@ static void init_row_q4x4x2(block_q4_0 * x, int64_t k) {
     }
 }
 
+
+static void repack_row_q4kx2(uint8_t * y, const block_q4_K * x, int64_t k) {
+    static const int qk = QK_Q4_Kx2 / 2; // 256
+    const int nb = k / qk;
+
+    uint8_t * y_q = y;
+    uint8_t * y_bs = y_q + (k / 2);
+    uint8_t * y_d = y_bs + (nb * 12);
+
+    for (int i = 0; i < nb; i++) {
+        memcpy(y_q + i * (qk / 2), x[i].qs, qk / 2);
+        memcpy(y_bs + i * 12, x[i].scales, 12);
+
+        ggml_half * d = (ggml_half *)(y_d + i * 4);
+        d[0] = x[i].d;
+        d[1] = x[i].dmin;
+    }
+}
+
+static void unpack_row_q4kx2(block_q4_K * x, const uint8_t * y, int64_t k) {
+    static const int qk = QK_Q4_Kx2 / 2; // 256
+    const int nb = k / qk;
+
+    const uint8_t * y_q = y;
+    const uint8_t * y_bs = y_q + (k / 2);
+    const uint8_t * y_d = y_bs + (nb * 12);
+
+    for (int i = 0; i < nb; i++) {
+        memcpy(x[i].qs, y_q + i * (qk / 2), qk / 2);
+        memcpy(x[i].scales, y_bs + i * 12, 12);
+
+        const ggml_half * d = (const ggml_half *)(y_d + i * 4);
+        x[i].d = d[0];
+        x[i].dmin = d[1];
+    }
+}
+
+static void init_row_q4kx2(block_q4_K * x, int64_t k) {
+    static const int qk = QK_Q4_Kx2 / 2; // 256
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        memset(x[i].qs, 8, qk / 2); // Unpacks into zeros?
+        memset(x[i].scales, 0, 12);
+        x[i].d = 0;
+        x[i].dmin = 0;
+    }
+}
+
+static void repack_q4_K_q4kx2(ggml_tensor * t, const void * data, size_t size) {
+    int64_t nrows = ggml_nrows(t);
+    size_t row_size = ggml_row_size(t->type, t->ne[0]);
+
+    const size_t total_tensor_size = (size_t)nrows * row_size;
+    const size_t n_bytes_to_copy = size < total_tensor_size ? size : total_tensor_size;
+    const int64_t n_full_rows = n_bytes_to_copy / row_size;
+    const size_t n_rem_bytes = n_bytes_to_copy % row_size;
+
+    void * buf_pd = ggml_aligned_malloc(row_size);
+    GGML_ASSERT(buf_pd != NULL);
+    void * buf_rp = ggml_aligned_malloc(row_size);
+    GGML_ASSERT(buf_rp != NULL);
+
+    HEX_VERBOSE("ggml-hex: repack-q4_K-q4kx2 %s : data %p size %zu dims %ldx%ld row-size %zu\n", t->name, data, size, t->ne[0], nrows, row_size);
+
+    for (int64_t i = 0; i < n_full_rows; i++) {
+        const uint8_t * src = (const uint8_t *) data + (i * row_size);
+        uint8_t * dst = (uint8_t *) t->data + (i * row_size);
+        repack_row_q4kx2(dst, (const block_q4_K *) src, t->ne[0]);
+    }
+
+    if (n_rem_bytes > 0) {
+        const int64_t i = n_full_rows;
+        const uint8_t * src = (const uint8_t *) data + (i * row_size);
+        uint8_t * dst = (uint8_t *) t->data + (i * row_size);
+        memset(buf_pd, 0, row_size);
+        memcpy(buf_pd, src, n_rem_bytes);
+        repack_row_q4kx2((uint8_t *) buf_rp, (const block_q4_K *) buf_pd, t->ne[0]);
+        memcpy(dst, buf_rp, n_rem_bytes);
+    }
+
+    ggml_aligned_free(buf_pd, row_size);
+    ggml_aligned_free(buf_rp, row_size);
+}
+
+static void repack_q4kx2_q4_K(void * data, const ggml_tensor * t, size_t size) {
+    int64_t nrows = ggml_nrows(t);
+    size_t row_size = ggml_row_size(t->type, t->ne[0]);
+
+    const size_t total_tensor_size = (size_t)nrows * row_size;
+    const size_t n_bytes_to_copy = size < total_tensor_size ? size : total_tensor_size;
+    const int64_t n_full_rows = n_bytes_to_copy / row_size;
+    const size_t n_rem_bytes = n_bytes_to_copy % row_size;
+
+    void * buf_pd = ggml_aligned_malloc(row_size);
+    GGML_ASSERT(buf_pd != NULL);
+    void * buf_rp = ggml_aligned_malloc(row_size);
+    GGML_ASSERT(buf_rp != NULL);
+
+    HEX_VERBOSE("ggml-hex: repack-q4kx2-q4_K %s : data %p size %zu dims %ldx%ld row-size %zu\n", t->name, data, size, t->ne[0], nrows, row_size);
+
+    for (int64_t i = 0; i < n_full_rows; i++) {
+        const uint8_t * src = (const uint8_t *) t->data + (i * row_size);
+        uint8_t * dst = (uint8_t *) data + (i * row_size);
+        unpack_row_q4kx2((block_q4_K *) dst, src, t->ne[0]);
+    }
+
+    if (n_rem_bytes > 0) {
+        const int64_t i = n_full_rows;
+        const uint8_t * src = (const uint8_t *) t->data + (i * row_size);
+        uint8_t * dst = (uint8_t *) data + (i * row_size);
+        memset(buf_pd, 0, row_size);
+        memcpy(buf_pd, src, row_size);
+        unpack_row_q4kx2((block_q4_K *) buf_rp, (const uint8_t *) buf_pd, t->ne[0]);
+        memcpy(dst, buf_rp, n_rem_bytes);
+    }
+
+    ggml_aligned_free(buf_pd, row_size);
+    ggml_aligned_free(buf_rp, row_size);
+}
+
 // repack q4_0 data into q4x4x2 tensor
 static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size) {
     int64_t nrows = ggml_nrows(t);
@@ -1350,6 +1471,12 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             repack_q4_0_q4x4x2(tensor, data, size);
             break;
 
+        case GGML_TYPE_Q4_K:
+            GGML_ASSERT(offset == 0);
+            GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
+            repack_q4_K_q4kx2(tensor, data, size);
+            break;
+
         case GGML_TYPE_Q8_0:
             GGML_ASSERT(offset == 0);
             GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
@@ -1390,6 +1517,12 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
             GGML_ASSERT(offset == 0);
             GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
             repack_q4x4x2_q4_0(data, tensor, size);
+            break;
+
+        case GGML_TYPE_Q4_K:
+            GGML_ASSERT(offset == 0);
+            GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
+            repack_q4kx2_q4_K(data, tensor, size);
             break;
 
         case GGML_TYPE_Q8_0:
@@ -2163,6 +2296,7 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
 
     switch (src0->type) {
         case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_K:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_MXFP4:
@@ -2213,6 +2347,7 @@ static bool ggml_hexagon_supported_mul_mat_id(const struct ggml_hexagon_session 
 
     switch (src0->type) {
         case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_K:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_MXFP4:
@@ -3297,6 +3432,8 @@ static void * ggml_backend_hexagon_get_proc_address(ggml_backend_reg_t reg, cons
 static void ggml_hexagon_init(ggml_backend_reg * reg) {
     // Basic sanity checks to make sure definitions match
     static_assert((unsigned int) HTP_TYPE_Q4_0 == (unsigned int) GGML_TYPE_Q4_0,
+                  "please update hexagon_type to match ggml_type");
+    static_assert((unsigned int) HTP_TYPE_Q4_K == (unsigned int) GGML_TYPE_Q4_K,
                   "please update hexagon_type to match ggml_type");
     static_assert((unsigned int) HTP_TYPE_Q8_0 == (unsigned int) GGML_TYPE_Q8_0,
                   "please update hexagon_type to match ggml_type");
