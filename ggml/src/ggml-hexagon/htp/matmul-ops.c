@@ -1000,18 +1000,21 @@ static void vec_dot_q8x4x2_q8x4x2_2x2(const int n, float * restrict s0, float * 
 }
 
 
+
+
+
 static void vec_dot_q4kx2_q8x4x2_1x1(const int n, float * restrict s0, const void * restrict vx0, const void * restrict vy0) {
     assert(n % 32 == 0);
     const uint32_t qk = 1024;
     const uint32_t nb = n / qk;
-    const uint32_t nloe = n % qk;
+    const uint32_t nloe = n % qk; // leftover multiples of 32
 
-    const uint32_t x_dblk_size = 8 * 4 * 2;
-    const uint32_t x_mblk_size = 8 * 4 * 2;
-    const uint32_t x_qblk_size = 512;
+    const uint32_t x_dblk_size = 8 * 4 * 2; // 32x __fp16 for d
+    const uint32_t x_mblk_size = 8 * 4 * 2; // 32x __fp16 for m
+    const uint32_t x_qblk_size = 512;       // 1024 quants -> 512 bytes
 
-    const uint32_t y_dblk_size = 8 * 4 * 2;
-    const uint32_t y_qblk_size = qk;
+    const uint32_t y_dblk_size = 8 * 4 * 2; // 32x __fp16
+    const uint32_t y_qblk_size = qk;        // 1024 int8
 
     const uint8_t * restrict r0_x_q = ((const uint8_t *) vx0 + 0);
     const uint8_t * restrict r0_x_d = ((const uint8_t *) vx0 + (n / 2));
@@ -1024,8 +1027,8 @@ static void vec_dot_q4kx2_q8x4x2_1x1(const int n, float * restrict s0, const voi
 
     HVX_Vector_x8 ones;
     HVX_Vector one_vec = Q6_Vb_vsplat_R(0x01);
-    ones.val[0] = one_vec; ones.val[1] = one_vec; ones.val[2] = one_vec; ones.val[3] = one_vec;
-    ones.val[4] = one_vec; ones.val[5] = one_vec; ones.val[6] = one_vec; ones.val[7] = one_vec;
+    ones.v[0] = one_vec; ones.v[1] = one_vec; ones.v[2] = one_vec; ones.v[3] = one_vec;
+    ones.v[4] = one_vec; ones.v[5] = one_vec; ones.v[6] = one_vec; ones.v[7] = one_vec;
 
     uint32_t i = 0;
     for (; i < nb; i++) {
@@ -1093,7 +1096,6 @@ static void vec_dot_q4kx2_q8x4x2_2x2(const int n, float * restrict s0, float * r
     vec_dot_q4kx2_q8x4x2_2x1(n, &s0[0], &s1[0], vx0, vx1, vy0);
     vec_dot_q4kx2_q8x4x2_2x1(n, &s0[1], &s1[1], vx0, vx1, vy1);
 }
-
 
 // ======== IQ4_NL x Q8_0 vec_dot kernels ========
 // Same structure as Q4_0 vec_dot but uses IQ4_NL LUT-based load (4-bit index -> int8 kvalue).
@@ -2848,6 +2850,7 @@ static int htp_mminit_vec_dot(struct htp_matmul_context * mmctx, enum htp_data_t
             mmctx->vec_dot_2x1 = vec_dot_q4x4x2_q8x4x2_2x1;
             mmctx->vec_dot_2x2 = vec_dot_q4x4x2_q8x4x2_2x2;
             return 0;
+
         case HTP_TYPE_Q4_K:
             mmctx->type        = "q4kx2-f32";
             mmctx->vec_dot_1x1 = vec_dot_q4kx2_q8x4x2_1x1;

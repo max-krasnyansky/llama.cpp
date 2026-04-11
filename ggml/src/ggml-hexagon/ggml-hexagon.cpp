@@ -545,11 +545,11 @@ static void repack_row_q4kx2(uint8_t * y, const block_q4_K * x, int64_t k) {
     for (int i = 0; i < nb; i++) {
         uint8_t qs[256];
 
-        const float d = (float) *(__fp16*)&x[i].d;
-        const float dmin = (float) *(__fp16*)&x[i].dmin;
+        const float d = GGML_FP16_TO_FP32(x[i].d);
+        const float dmin = GGML_FP16_TO_FP32(x[i].dmin);
 
-        __fp16 * d_ptr = (__fp16 *)(y_d + i * dblk_size);
-        __fp16 * m_ptr = (__fp16 *)(y_m + i * mblk_size);
+        ggml_half * d_ptr = (ggml_half *)(y_d + i * dblk_size);
+        ggml_half * m_ptr = (ggml_half *)(y_m + i * mblk_size);
 
         for (int is = 0; is < 8; is++) {
             uint8_t sc, m_scale;
@@ -560,8 +560,8 @@ static void repack_row_q4kx2(uint8_t * y, const block_q4_K * x, int64_t k) {
                 sc = (x[i].scales[is+4] & 0xF) | ((x[i].scales[is-4] >> 6) << 4);
                 m_scale = (x[i].scales[is+4] >>  4) | ((x[i].scales[is-0] >> 6) << 4);
             }
-            d_ptr[is] = (__fp16)(d * sc);
-            m_ptr[is] = (__fp16)(dmin * m_scale);
+            d_ptr[is] = GGML_FP32_TO_FP16(d * sc);
+            m_ptr[is] = GGML_FP32_TO_FP16(dmin * m_scale);
 
             for (int l = 0; l < 32; l++) {
                 int q_idx = (is / 2) * 32 + l;
@@ -625,15 +625,15 @@ static void unpack_row_q4kx2(block_q4_K * x, const uint8_t * y, int64_t k) {
             }
         }
 
-        const __fp16 * d_ptr = (const __fp16 *)(y_d + i * dblk_size);
-        const __fp16 * m_ptr = (const __fp16 *)(y_m + i * mblk_size);
+        const ggml_half * d_ptr = (const ggml_half *)(y_d + i * dblk_size);
+        const ggml_half * m_ptr = (const ggml_half *)(y_m + i * mblk_size);
 
-        *(__fp16*)&x[i].d = d_ptr[0];
-        *(__fp16*)&x[i].dmin = m_ptr[0];
+        x[i].d = d_ptr[0];
+        x[i].dmin = m_ptr[0];
 
         for (int is = 0; is < 8; is++) {
-            int sc = (int)((float)d_ptr[is] / (float)d_ptr[0]);
-            int m_scale = (int)((float)m_ptr[is] / (float)m_ptr[0]);
+            int sc = (int)(GGML_FP16_TO_FP32(d_ptr[is]) / GGML_FP16_TO_FP32(d_ptr[0]));
+            int m_scale = (int)(GGML_FP16_TO_FP32(m_ptr[is]) / GGML_FP16_TO_FP32(m_ptr[0]));
             if (sc > 63) sc = 63; if (sc < 0) sc = 0;
             if (m_scale > 63) m_scale = 63; if (m_scale < 0) m_scale = 0;
 
@@ -3518,8 +3518,6 @@ static void * ggml_backend_hexagon_get_proc_address(ggml_backend_reg_t reg, cons
 static void ggml_hexagon_init(ggml_backend_reg * reg) {
     // Basic sanity checks to make sure definitions match
     static_assert((unsigned int) HTP_TYPE_Q4_0 == (unsigned int) GGML_TYPE_Q4_0,
-                  "please update hexagon_type to match ggml_type");
-    static_assert((unsigned int) HTP_TYPE_Q4_K == (unsigned int) GGML_TYPE_Q4_K,
                   "please update hexagon_type to match ggml_type");
     static_assert((unsigned int) HTP_TYPE_Q4_K == (unsigned int) GGML_TYPE_Q4_K,
                   "please update hexagon_type to match ggml_type");
