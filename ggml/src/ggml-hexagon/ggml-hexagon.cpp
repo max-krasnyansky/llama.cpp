@@ -532,46 +532,128 @@ static void init_row_q4x4x2(block_q4_0 * x, int64_t k) {
 
 static void repack_row_q4kx2(uint8_t * y, const block_q4_K * x, int64_t k) {
     static const int qk = QK_Q4_Kx2 / 2; // 256
-    const int nb = k / qk;
+    const int nb = (k + qk - 1) / qk;
+
+    const int dblk_size = 8 * 2; // 8x __fp16 for d
+    const int mblk_size = 8 * 2; // 8x __fp16 for m
+    const int qblk_size = qk / 2; // 128 bytes
 
     uint8_t * y_q = y;
-    uint8_t * y_bs = y_q + (k / 2);
-    uint8_t * y_d = y_bs + (nb * 12);
+    uint8_t * y_d = y + k / 2;
+    uint8_t * y_m = y_d + nb * dblk_size;
 
     for (int i = 0; i < nb; i++) {
-        memcpy(y_q + i * (qk / 2), x[i].qs, qk / 2);
-        memcpy(y_bs + i * 12, x[i].scales, 12);
+        uint8_t qs[256];
 
-        ggml_half * d = (ggml_half *)(y_d + i * 4);
-        d[0] = x[i].d;
-        d[1] = x[i].dmin;
+        const float d = (float) *(__fp16*)&x[i].d;
+        const float dmin = (float) *(__fp16*)&x[i].dmin;
+
+        __fp16 * d_ptr = (__fp16 *)(y_d + i * dblk_size);
+        __fp16 * m_ptr = (__fp16 *)(y_m + i * mblk_size);
+
+        for (int is = 0; is < 8; is++) {
+            uint8_t sc, m_scale;
+            if (is < 4) {
+                sc = x[i].scales[is] & 63;
+                m_scale = x[i].scales[is + 4] & 63;
+            } else {
+                sc = (x[i].scales[is+4] & 0xF) | ((x[i].scales[is-4] >> 6) << 4);
+                m_scale = (x[i].scales[is+4] >>  4) | ((x[i].scales[is-0] >> 6) << 4);
+            }
+            d_ptr[is] = (__fp16)(d * sc);
+            m_ptr[is] = (__fp16)(dmin * m_scale);
+
+            for (int l = 0; l < 32; l++) {
+                int q_idx = (is / 2) * 32 + l;
+                qs[is * 32 + l] = is % 2 == 0 ? (x[i].qs[q_idx] & 0xF) : (x[i].qs[q_idx] >> 4);
+            }
+        }
+
+        block_q4_0 temp_x[8];
+        pack_q4_0_quants(&temp_x[0], qs, 0);
+        pack_q4_0_quants(&temp_x[1], qs, 1);
+        pack_q4_0_quants(&temp_x[2], qs, 2);
+        pack_q4_0_quants(&temp_x[3], qs, 3);
+        pack_q4_0_quants(&temp_x[4], qs, 4);
+        pack_q4_0_quants(&temp_x[5], qs, 5);
+        pack_q4_0_quants(&temp_x[6], qs, 6);
+        pack_q4_0_quants(&temp_x[7], qs, 7);
+
+        for (int j = 0; j < 8; j++) {
+            memcpy(y_q + i * qblk_size + j * 16, temp_x[j].qs, 16);
+        }
     }
 }
 
 static void unpack_row_q4kx2(block_q4_K * x, const uint8_t * y, int64_t k) {
     static const int qk = QK_Q4_Kx2 / 2; // 256
-    const int nb = k / qk;
+    const int nb = (k + qk - 1) / qk;
+
+    const int dblk_size = 8 * 2; // 8x __fp16 for d
+    const int mblk_size = 8 * 2; // 8x __fp16 for m
+    const int qblk_size = qk / 2; // 128 bytes
 
     const uint8_t * y_q = y;
-    const uint8_t * y_bs = y_q + (k / 2);
-    const uint8_t * y_d = y_bs + (nb * 12);
+    const uint8_t * y_d = y + k / 2;
+    const uint8_t * y_m = y_d + nb * dblk_size;
 
     for (int i = 0; i < nb; i++) {
-        memcpy(x[i].qs, y_q + i * (qk / 2), qk / 2);
-        memcpy(x[i].scales, y_bs + i * 12, 12);
+        uint8_t qs[256];
 
-        const ggml_half * d = (const ggml_half *)(y_d + i * 4);
-        x[i].d = d[0];
-        x[i].dmin = d[1];
+        block_q4_0 temp_x[8];
+        for (int j = 0; j < 8; j++) {
+            memcpy(temp_x[j].qs, y_q + i * qblk_size + j * 16, 16);
+        }
+
+        unpack_q4_0_quants(qs, &temp_x[0], 0);
+        unpack_q4_0_quants(qs, &temp_x[1], 1);
+        unpack_q4_0_quants(qs, &temp_x[2], 2);
+        unpack_q4_0_quants(qs, &temp_x[3], 3);
+        unpack_q4_0_quants(qs, &temp_x[4], 4);
+        unpack_q4_0_quants(qs, &temp_x[5], 5);
+        unpack_q4_0_quants(qs, &temp_x[6], 6);
+        unpack_q4_0_quants(qs, &temp_x[7], 7);
+
+        for (int is = 0; is < 8; is++) {
+            for (int l = 0; l < 32; l++) {
+                int q_idx = (is / 2) * 32 + l;
+                if (is % 2 == 0) {
+                    x[i].qs[q_idx] = qs[is * 32 + l] & 0xF;
+                } else {
+                    x[i].qs[q_idx] |= (qs[is * 32 + l] & 0xF) << 4;
+                }
+            }
+        }
+
+        const __fp16 * d_ptr = (const __fp16 *)(y_d + i * dblk_size);
+        const __fp16 * m_ptr = (const __fp16 *)(y_m + i * mblk_size);
+
+        *(__fp16*)&x[i].d = d_ptr[0];
+        *(__fp16*)&x[i].dmin = m_ptr[0];
+
+        for (int is = 0; is < 8; is++) {
+            int sc = (int)((float)d_ptr[is] / (float)d_ptr[0]);
+            int m_scale = (int)((float)m_ptr[is] / (float)m_ptr[0]);
+            if (sc > 63) sc = 63; if (sc < 0) sc = 0;
+            if (m_scale > 63) m_scale = 63; if (m_scale < 0) m_scale = 0;
+
+            if (is < 4) {
+                x[i].scales[is] = (sc & 63);
+                x[i].scales[is + 4] = (m_scale & 63);
+            } else {
+                x[i].scales[is + 4] = (sc & 0xF) | ((m_scale & 0xF) << 4);
+                x[i].scales[is - 4] |= ((sc >> 4) << 6);
+                x[i].scales[is - 0] |= ((m_scale >> 4) << 6);
+            }
+        }
     }
 }
 
 static void init_row_q4kx2(block_q4_K * x, int64_t k) {
     static const int qk = QK_Q4_Kx2 / 2; // 256
-    const int nb = k / qk;
-
+    const int nb = (k + qk - 1) / qk;
     for (int i = 0; i < nb; i++) {
-        memset(x[i].qs, 8, qk / 2); // Unpacks into zeros?
+        memset(x[i].qs, 8, qk / 2);
         memset(x[i].scales, 0, 12);
         x[i].d = 0;
         x[i].dmin = 0;
@@ -581,74 +663,78 @@ static void init_row_q4kx2(block_q4_K * x, int64_t k) {
 static void repack_q4_K_q4kx2(ggml_tensor * t, const void * data, size_t size) {
     int64_t nrows = ggml_nrows(t);
     size_t row_size = ggml_row_size(t->type, t->ne[0]);
+    size_t row_size_pd = ggml_row_size(t->type, hex_round_up(t->ne[0], QK_Q4_Kx2 / 2));
+    size_t row_size_rp = (t->ne[0] / 2) + (t->ne[0] / 256) * 32;
 
     const size_t total_tensor_size = (size_t)nrows * row_size;
     const size_t n_bytes_to_copy = size < total_tensor_size ? size : total_tensor_size;
     const int64_t n_full_rows = n_bytes_to_copy / row_size;
     const size_t n_rem_bytes = n_bytes_to_copy % row_size;
 
-    void * buf_pd = ggml_aligned_malloc(row_size);
+    void * buf_pd = ggml_aligned_malloc(row_size_pd);
     GGML_ASSERT(buf_pd != NULL);
-    void * buf_rp = ggml_aligned_malloc(row_size);
+    void * buf_rp = ggml_aligned_malloc(row_size_rp);
     GGML_ASSERT(buf_rp != NULL);
 
-    HEX_VERBOSE("ggml-hex: repack-q4_K-q4kx2 %s : data %p size %zu dims %ldx%ld row-size %zu\n", t->name, data, size, t->ne[0], nrows, row_size);
+    memset(buf_pd, 0, row_size_pd);
 
     for (int64_t i = 0; i < n_full_rows; i++) {
         const uint8_t * src = (const uint8_t *) data + (i * row_size);
-        uint8_t * dst = (uint8_t *) t->data + (i * row_size);
-        repack_row_q4kx2(dst, (const block_q4_K *) src, t->ne[0]);
+        uint8_t * dst = (uint8_t *) t->data + (i * row_size_rp);
+        memcpy(buf_pd, src, row_size);
+        repack_row_q4kx2(dst, (const block_q4_K *) buf_pd, t->ne[0]);
     }
 
     if (n_rem_bytes > 0) {
         const int64_t i = n_full_rows;
         const uint8_t * src = (const uint8_t *) data + (i * row_size);
-        uint8_t * dst = (uint8_t *) t->data + (i * row_size);
-        memset(buf_pd, 0, row_size);
+        uint8_t * dst = (uint8_t *) t->data + (i * row_size_rp);
         memcpy(buf_pd, src, n_rem_bytes);
         repack_row_q4kx2((uint8_t *) buf_rp, (const block_q4_K *) buf_pd, t->ne[0]);
-        memcpy(dst, buf_rp, n_rem_bytes);
+        memcpy(dst, buf_rp, row_size_rp);
     }
 
-    ggml_aligned_free(buf_pd, row_size);
-    ggml_aligned_free(buf_rp, row_size);
+    ggml_aligned_free(buf_pd, row_size_pd);
+    ggml_aligned_free(buf_rp, row_size_rp);
 }
 
 static void repack_q4kx2_q4_K(void * data, const ggml_tensor * t, size_t size) {
     int64_t nrows = ggml_nrows(t);
     size_t row_size = ggml_row_size(t->type, t->ne[0]);
+    size_t row_size_pd = ggml_row_size(t->type, hex_round_up(t->ne[0], QK_Q4_Kx2 / 2));
+    size_t row_size_rp = (t->ne[0] / 2) + (t->ne[0] / 256) * 32;
 
     const size_t total_tensor_size = (size_t)nrows * row_size;
     const size_t n_bytes_to_copy = size < total_tensor_size ? size : total_tensor_size;
     const int64_t n_full_rows = n_bytes_to_copy / row_size;
     const size_t n_rem_bytes = n_bytes_to_copy % row_size;
 
-    void * buf_pd = ggml_aligned_malloc(row_size);
+    void * buf_pd = ggml_aligned_malloc(row_size_pd);
     GGML_ASSERT(buf_pd != NULL);
-    void * buf_rp = ggml_aligned_malloc(row_size);
+    void * buf_rp = ggml_aligned_malloc(row_size_rp);
     GGML_ASSERT(buf_rp != NULL);
 
-    HEX_VERBOSE("ggml-hex: repack-q4kx2-q4_K %s : data %p size %zu dims %ldx%ld row-size %zu\n", t->name, data, size, t->ne[0], nrows, row_size);
+    memset(buf_pd, 0, row_size_pd);
 
     for (int64_t i = 0; i < n_full_rows; i++) {
-        const uint8_t * src = (const uint8_t *) t->data + (i * row_size);
+        const uint8_t * src = (const uint8_t *) t->data + (i * row_size_rp);
         uint8_t * dst = (uint8_t *) data + (i * row_size);
-        unpack_row_q4kx2((block_q4_K *) dst, src, t->ne[0]);
+        unpack_row_q4kx2((block_q4_K *) buf_pd, src, t->ne[0]);
+        memcpy(dst, buf_pd, row_size);
     }
 
     if (n_rem_bytes > 0) {
         const int64_t i = n_full_rows;
-        const uint8_t * src = (const uint8_t *) t->data + (i * row_size);
+        const uint8_t * src = (const uint8_t *) t->data + (i * row_size_rp);
         uint8_t * dst = (uint8_t *) data + (i * row_size);
-        memset(buf_pd, 0, row_size);
-        memcpy(buf_pd, src, row_size);
-        unpack_row_q4kx2((block_q4_K *) buf_rp, (const uint8_t *) buf_pd, t->ne[0]);
-        memcpy(dst, buf_rp, n_rem_bytes);
+        unpack_row_q4kx2((block_q4_K *) buf_pd, src, t->ne[0]);
+        memcpy(dst, buf_pd, n_rem_bytes);
     }
 
-    ggml_aligned_free(buf_pd, row_size);
-    ggml_aligned_free(buf_rp, row_size);
+    ggml_aligned_free(buf_pd, row_size_pd);
+    ggml_aligned_free(buf_rp, row_size_rp);
 }
+
 
 // repack q4_0 data into q4x4x2 tensor
 static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size) {
@@ -3432,6 +3518,8 @@ static void * ggml_backend_hexagon_get_proc_address(ggml_backend_reg_t reg, cons
 static void ggml_hexagon_init(ggml_backend_reg * reg) {
     // Basic sanity checks to make sure definitions match
     static_assert((unsigned int) HTP_TYPE_Q4_0 == (unsigned int) GGML_TYPE_Q4_0,
+                  "please update hexagon_type to match ggml_type");
+    static_assert((unsigned int) HTP_TYPE_Q4_K == (unsigned int) GGML_TYPE_Q4_K,
                   "please update hexagon_type to match ggml_type");
     static_assert((unsigned int) HTP_TYPE_Q4_K == (unsigned int) GGML_TYPE_Q4_K,
                   "please update hexagon_type to match ggml_type");

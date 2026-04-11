@@ -999,18 +999,19 @@ static void vec_dot_q8x4x2_q8x4x2_2x2(const int n, float * restrict s0, float * 
     hvx_vec_store_u(&s1[0], 8, r0_r1_c1_sum);  // row0,col1 row1,col1
 }
 
+
 static void vec_dot_q4kx2_q8x4x2_1x1(const int n, float * restrict s0, const void * restrict vx0, const void * restrict vy0) {
-    assert(n % 256 == 0);
+    assert(n % 32 == 0);
     const uint32_t qk = 1024;
     const uint32_t nb = n / qk;
-    const uint32_t nloe = n % qk; // leftover multiples of 256
+    const uint32_t nloe = n % qk;
 
-    const uint32_t x_dblk_size = 8 * 4 * 2; // 32x __fp16 for d
-    const uint32_t x_mblk_size = 8 * 4 * 2; // 32x __fp16 for m
-    const uint32_t x_qblk_size = 512;       // 1024 quants -> 512 bytes
+    const uint32_t x_dblk_size = 8 * 4 * 2;
+    const uint32_t x_mblk_size = 8 * 4 * 2;
+    const uint32_t x_qblk_size = 512;
 
-    const uint32_t y_dblk_size = 8 * 4 * 2; // 32x __fp16
-    const uint32_t y_qblk_size = qk;        // 1024 int8
+    const uint32_t y_dblk_size = 8 * 4 * 2;
+    const uint32_t y_qblk_size = qk;
 
     const uint8_t * restrict r0_x_q = ((const uint8_t *) vx0 + 0);
     const uint8_t * restrict r0_x_d = ((const uint8_t *) vx0 + (n / 2));
@@ -1048,6 +1049,31 @@ static void vec_dot_q4kx2_q8x4x2_1x1(const int n, float * restrict s0, const voi
         r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vsub_Vqf32Vsf(r0_sum, r0_fb));
     }
 
+    if (nloe) {
+        HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_partial(y_q + i * y_qblk_size, nloe);
+        HVX_Vector_x8 r0_q = hvx_vec_load_q4x4x8_partial(r0_x_q + i * x_qblk_size, nloe);
+
+        HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(r0_q, vy_q));
+        HVX_Vector sum_y = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(ones, vy_q));
+
+        HVX_Vector vy_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y_d + i * y_dblk_size));
+        HVX_Vector r0_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_d + i * x_dblk_size));
+        HVX_Vector r0_m = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_m + i * x_mblk_size));
+
+        HVX_Vector r0_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_d, vy_d)));
+        HVX_Vector r0_mm = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy_d)));
+
+        HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe / 8);
+        r0_dd                = Q6_V_vand_QV(bmask, r0_dd);
+        r0_mm                = Q6_V_vand_QV(bmask, r0_mm);
+
+        HVX_Vector r0_fa = Q6_Vqf32_vmpy_VsfVsf(r0_ia, r0_dd);
+        HVX_Vector r0_fb = Q6_Vqf32_vmpy_VsfVsf(sum_y, r0_mm);
+
+        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_fa, r0_sum));
+        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vsub_Vqf32Vsf(r0_sum, r0_fb));
+    }
+
     float s = 0.0f;
     float sum_arr[32] __attribute__((aligned(128)));
     *(HVX_Vector *)sum_arr = r0_sum;
@@ -1055,38 +1081,6 @@ static void vec_dot_q4kx2_q8x4x2_1x1(const int n, float * restrict s0, const voi
         s += sum_arr[k];
     }
 
-    if (nloe) {
-        const int loe_blocks = nloe / 256;
-        for (int k = 0; k < loe_blocks; k++) {
-            const int offset_q = nb * 1024 + k * 256;
-            const int offset_d = nb * x_dblk_size + k * 16;
-            const int offset_m = nb * x_mblk_size + k * 16;
-            const int y_offset_d = nb * y_dblk_size + k * 16;
-
-            const uint8_t * q = r0_x_q + offset_q / 2;
-            const int8_t * y = (const int8_t *)(y_q + offset_q);
-            const ggml_half * d_ptr = (const ggml_half *)(r0_x_d + offset_d);
-            const ggml_half * m_ptr = (const ggml_half *)(r0_x_m + offset_m);
-            const ggml_half * yd_ptr = (const ggml_half *)(y_d + y_offset_d);
-
-            for (int is = 0; is < 8; is++) {
-                const float d_val = GGML_FP16_TO_FP32(d_ptr[is]);
-                const float m_val = GGML_FP16_TO_FP32(m_ptr[is]);
-                const float y_scale = GGML_FP16_TO_FP32(yd_ptr[is]);
-
-                int32_t sum_qy = 0;
-                int32_t sum_y_s = 0;
-                for (int l = 0; l < 32; l++) {
-                    int q_idx = is * 16 + l/2;
-                    uint8_t quant = l % 2 == 0 ? (q[q_idx] & 0xF) : (q[q_idx] >> 4);
-                    int8_t y_val = y[is * 32 + l];
-                    sum_qy += quant * y_val;
-                    sum_y_s += y_val;
-                }
-                s += (d_val * sum_qy - m_val * sum_y_s) * y_scale;
-            }
-        }
-    }
     *s0 += s;
 }
 
@@ -1099,6 +1093,7 @@ static void vec_dot_q4kx2_q8x4x2_2x2(const int n, float * restrict s0, float * r
     vec_dot_q4kx2_q8x4x2_2x1(n, &s0[0], &s1[0], vx0, vx1, vy0);
     vec_dot_q4kx2_q8x4x2_2x1(n, &s0[1], &s1[1], vx0, vx1, vy1);
 }
+
 
 // ======== IQ4_NL x Q8_0 vec_dot kernels ========
 // Same structure as Q4_0 vec_dot but uses IQ4_NL LUT-based load (4-bit index -> int8 kvalue).
