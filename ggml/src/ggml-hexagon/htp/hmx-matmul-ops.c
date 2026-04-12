@@ -86,6 +86,8 @@ static inline size_t get_x4x2_row_stride(int weight_type, int k) {
         case HTP_TYPE_Q4_0:
         case HTP_TYPE_IQ4_NL:
             return (size_t) nb * (QK_Q4_0x4x2 / 2 + HMX_X4X2_DBLK_SIZE);         // 144 * nb
+        case HTP_TYPE_Q4_1:
+            return (size_t) nb * (QK_Q4_0x4x2 / 2 + HMX_X4X2_DBLK_SIZE * 2);     // 160 * nb
         case HTP_TYPE_Q8_0:
             return (size_t) nb * (QK_Q8_0x4x2 + HMX_X4X2_DBLK_SIZE);             // 272 * nb
         case HTP_TYPE_MXFP4:
@@ -430,6 +432,18 @@ static void dequantize_x4x2_weight_to_fp16_tiles_task(
                     v1[0] = v1[1] = v1[2] = v1[3] = Q6_V_vzero();
                 }
 
+                if (weight_type == HTP_TYPE_Q4_1) {
+                    int m_off = (k_block / 32) * 2;
+                    for (int g = 0; g < 4; g++) {
+                        HVX_Vector m0 = Q6_V_vsplat_R(*(uint32_t *)(r0 + scale_off + g * sizeof(__fp16) + m_off));
+                        v0[g] = Q6_Vhf_vadd_VhfVhf(v0[g], m0);
+                        if (row1 < n_cols) {
+                            HVX_Vector m1 = Q6_V_vsplat_R(*(uint32_t *)(r1 + scale_off + g * sizeof(__fp16) + m_off));
+                            v1[g] = Q6_Vhf_vadd_VhfVhf(v1[g], m1);
+                        }
+                    }
+                }
+
                 for (int g = 0; g < 4; g++) { Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_bases[g], HMX_FP16_TILE_SIZE - 1, v_off, v0[g]); }
                 v_off = Q6_Vw_vadd_VwVw(v_off, v_scat_step);
                 for (int g = 0; g < 4; g++) { Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_bases[g], HMX_FP16_TILE_SIZE - 1, v_off, v1[g]); }
@@ -516,6 +530,16 @@ static void dequantize_x4x2_weight_to_fp16_tiles_task(
                     ? dequantize_x4x2_q4_0_group_hvx(
                         r1 + byte_off, upper, (const __fp16 *)(r1 + scale_off), vlut_cvt)
                     : Q6_V_vzero();
+
+                if (weight_type == HTP_TYPE_Q4_1) {
+                    int m_off = (k_block / 32) * 2;
+                    HVX_Vector m0 = Q6_V_vsplat_R(*(uint32_t *)(r0 + scale_off + m_off));
+                    v0 = Q6_Vhf_vadd_VhfVhf(v0, m0);
+                    if (row1 < n_cols) {
+                        HVX_Vector m1 = Q6_V_vsplat_R(*(uint32_t *)(r1 + scale_off + m_off));
+                        v1 = Q6_Vhf_vadd_VhfVhf(v1, m1);
+                    }
+                }
 
                 Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, HMX_FP16_TILE_SIZE - 1, v_off, v0);
                 v_off = Q6_Vw_vadd_VwVw(v_off, v_scat_step);

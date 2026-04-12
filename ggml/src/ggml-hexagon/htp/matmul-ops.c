@@ -148,6 +148,130 @@ static inline HVX_Vector_x8 hvx_vec_load_iq4nlx4x8_partial(const uint8_t * restr
 
 // q4x4x2 and q8x4x2 are the flat q4/8_0 formats where all quants are stored first followed by all scales
 
+
+
+static inline size_t q8_1x4x2_row_size(int ne0) {
+    int nb = ne0 / QK_Q4_1x4x2;
+    // Each QK_Q4_1x4x2 (256 elements) has 8 blocks of 32 elements.
+    // For q8_1x4x2 we store:
+    // - quants: 256 bytes
+    // - scales: 8 * sizeof(ggml_fp16_t) = 16 bytes
+    // - mins/padding: 8 * sizeof(ggml_fp16_t) = 16 bytes
+    // - sums: 8 * sizeof(float) = 32 bytes
+    return nb * (QK_Q4_1x4x2 + 8 * sizeof(ggml_fp16_t) * 2 + 8 * sizeof(float));
+}
+
+static void quantize_row_f32_q8_1x4x2(const float * src, void * dst, int ne0) {
+    const int nb = ne0 / QK_Q4_1x4x2;
+
+    int8_t * out_qs = (int8_t *)dst;
+    ggml_fp16_t * out_ds = (ggml_fp16_t *)(out_qs + nb * QK_Q4_1x4x2);
+    ggml_fp16_t * out_ms = out_ds + nb * 8;
+    float * out_sums = (float *)(out_ms + nb * 8);
+
+    for (int i = 0; i < nb; i++) {
+        for (int b = 0; b < 8; b++) {
+            float max = 0.0f;
+            float amax = 0.0f;
+            float sum = 0.0f;
+            for (int j = 0; j < 32; j++) {
+                float v = src[i * QK_Q4_1x4x2 + b * 32 + j];
+                if (amax < fabsf(v)) {
+                    amax = fabsf(v);
+                    max = v;
+                }
+                sum += v;
+            }
+
+            const float d = max / 127.0f;
+            const float id = d ? 1.0f / d : 0.0f;
+
+            out_ds[i * 8 + b] = ((union { __fp16 f; uint16_t i; }){ .f = d }).i;
+            out_ms[i * 8 + b] = ((union { __fp16 f; uint16_t i; }){ .f = 0.0f }).i;
+            out_sums[i * 8 + b] = sum;
+
+            for (int j = 0; j < 32; j++) {
+                const float v = src[i * QK_Q4_1x4x2 + b * 32 + j] * id;
+                out_qs[i * QK_Q4_1x4x2 + b * 32 + j] = (int8_t)roundf(v);
+            }
+        }
+    }
+}
+
+// Dummy vector dot for testing
+static void vec_dot_q4_1x4x2_q8_1x4x2_1x1(const void * vsrc0, const void * vsrc1, float * dst, int ne00) {
+    const uint8_t * src0 = (const uint8_t *)vsrc0;
+    const uint8_t * src1 = (const uint8_t *)vsrc1;
+
+    const int nb = ne00 / QK_Q4_1x4x2;
+    const int num_qs_0 = nb * QK_Q4_1x4x2 / 2;
+
+    const uint8_t * qs0 = src0;
+    const ggml_fp16_t * ds0 = (const ggml_fp16_t *)(src0 + num_qs_0);
+    const ggml_fp16_t * ms0 = ds0 + nb * 8;
+
+    const int8_t * qs1 = (const int8_t *)src1;
+    const ggml_fp16_t * ds1 = (const ggml_fp16_t *)(qs1 + nb * QK_Q4_1x4x2);
+    const float * sums1 = (const float *)(ds1 + nb * 8 + nb * 8);
+
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; i++) {
+        for (int j = 0; j < 128; j++) {
+            uint8_t q0 = qs0[i * 128 + j];
+
+            int8_t q1_0 = qs1[i * 256 + j];
+            int8_t q1_1 = qs1[i * 256 + j + 128];
+
+            int blk0 = j / 32;
+            int blk1 = j / 32 + 4;
+
+            const float d0_0 = (float)((__fp16 *)ds0)[i * 8 + blk0];
+            const float d1_0 = (float)((__fp16 *)ds1)[i * 8 + blk0];
+
+            const float d0_1 = (float)((__fp16 *)ds0)[i * 8 + blk1];
+            const float d1_1 = (float)((__fp16 *)ds1)[i * 8 + blk1];
+
+            sumf += (q0 & 0x0F) * q1_0 * d0_0 * d1_0;
+            sumf += (q0 >> 4) * q1_1 * d0_1 * d1_1;
+        }
+
+        for (int b = 0; b < 8; b++) {
+            const float m0 = (float)((__fp16 *)ms0)[i * 8 + b];
+            const float sum1 = sums1[i * 8 + b];
+            sumf += m0 * sum1;
+        }
+    }
+
+    *dst = sumf;
+}
+
+static void vec_dot_q4_1x4x2_q8_1x4x2_2x1(const void * vsrc0, const void * vsrc1, float * dst, int ne00) {
+    const size_t src0_row_size = ne00 / QK_Q4_1x4x2 * (QK_Q4_1x4x2 / 2 + sizeof(ggml_fp16_t) * 2);
+    const uint8_t * src0_0 = (const uint8_t *)vsrc0;
+    const uint8_t * src0_1 = src0_0 + src0_row_size;
+
+    vec_dot_q4_1x4x2_q8_1x4x2_1x1(src0_0, vsrc1, dst + 0, ne00);
+    vec_dot_q4_1x4x2_q8_1x4x2_1x1(src0_1, vsrc1, dst + 1, ne00);
+}
+
+static void vec_dot_q4_1x4x2_q8_1x4x2_2x2(const void * vsrc0, const void * vsrc1, float * dst, int ne00) {
+    const size_t src0_row_size = ne00 / QK_Q4_1x4x2 * (QK_Q4_1x4x2 / 2 + sizeof(ggml_fp16_t) * 2);
+    const size_t src1_row_size = q8_1x4x2_row_size(ne00);
+
+    const uint8_t * src0_0 = (const uint8_t *)vsrc0;
+    const uint8_t * src0_1 = src0_0 + src0_row_size;
+
+    const uint8_t * src1_0 = (const uint8_t *)vsrc1;
+    const uint8_t * src1_1 = src1_0 + src1_row_size;
+
+    vec_dot_q4_1x4x2_q8_1x4x2_1x1(src0_0, src1_0, dst + 0, ne00);
+    vec_dot_q4_1x4x2_q8_1x4x2_1x1(src0_1, src1_0, dst + 1, ne00);
+    vec_dot_q4_1x4x2_q8_1x4x2_1x1(src0_0, src1_1, dst + 2, ne00);
+    vec_dot_q4_1x4x2_q8_1x4x2_1x1(src0_1, src1_1, dst + 3, ne00);
+}
+
+
 static inline size_t q8x4x2_row_size(uint32_t ne) {
     // ensures perfect alignment of quants and full row
     const uint32_t qk = QK_Q8_0x4x2;
@@ -2746,6 +2870,14 @@ static inline bool htp_is_permuted(const struct htp_tensor * t) {
 
 static int htp_mminit_vec_dot(struct htp_matmul_context * mmctx, enum htp_data_type type) {
     switch (type) {
+
+        case HTP_TYPE_Q4_1:
+            mmctx->type        = "q4_1x4x2-q8_1x4x2";
+            mmctx->vec_dot_1x1 = vec_dot_q4_1x4x2_q8_1x4x2_1x1;
+            mmctx->vec_dot_2x1 = vec_dot_q4_1x4x2_q8_1x4x2_2x1;
+            mmctx->vec_dot_2x2 = vec_dot_q4_1x4x2_q8_1x4x2_2x2;
+            break;
+
         case HTP_TYPE_Q4_0:
             mmctx->type        = "q4x4x2-f32";
             mmctx->vec_dot_1x1 = vec_dot_q4x4x2_q8x4x2_1x1;
@@ -3120,8 +3252,15 @@ int op_matmul_id(struct htp_ops_context * octx) {
         return HTP_STATUS_NO_SUPPORT;
     }
 
-    quant_job_func = quantize_f32_q8x4x2;
-    src1_row_size  = q8x4x2_row_size(ne10);
+
+    if (src0->type == HTP_TYPE_Q4_1) {
+        quant_job_func = quantize_row_f32_q8_1x4x2;
+        src1_row_size  = q8_1x4x2_row_size(ne10);
+    } else {
+        quant_job_func = quantize_f32_q8x4x2;
+        src1_row_size  = q8x4x2_row_size(ne10);
+    }
+
 
     const size_t src2_spad_size_per_thread = hex_round_up(matrix_row_counts_size + matrix_row_map_size, 256);
     htp_mminit_spad(octx, dst_row_size, src0_row_size_padded, src1_row_size, src1_nrows, src2_spad_size_per_thread);
