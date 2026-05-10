@@ -544,6 +544,19 @@ static void init_row_q4x4x2(block_q4_0 * x, int64_t k) {
     }
 }
 
+
+static inline void unpack_q4_1_quants(uint8_t * y, const block_q4_1 * x, int b) {
+    for (int i = 0; i < QK4_1 / 2; i++) {
+        y[b * QK4_1 / 2 + i + 000] = x->qs[i] & 0x0F;
+        y[b * QK4_1 / 2 + i + 128] = x->qs[i] >> 4;
+    }
+}
+static inline void pack_q4_1_quants(block_q4_1 * y, const uint8_t * x, int b) {
+    for (int i = 0; i < QK4_1 / 2; i++) {
+        y->qs[i] = (x[b * QK4_1 / 2 + i + 000] & 0x0F) | (x[b * QK4_1 / 2 + i + 128] << 4);
+    }
+}
+
 // repack q4_0 data into q4x4x2 tensor
 static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size) {
     int64_t nrows = ggml_nrows(t);
@@ -604,6 +617,237 @@ static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size) 
     ggml_aligned_free(buf_pd, row_size_pd);
     ggml_aligned_free(buf_rp, row_size_rp);
 }
+
+
+static void repack_row_q4x4x2_q4_1(uint8_t * y, const block_q4_1 * x, int64_t k) {
+    static const int qk = QK_Q4_1x4x2;
+    const int        nb = (k + qk - 1) / qk;  // number of blocks (padded)
+    const int        nloe = k % qk;           // leftovers
+
+    const int dblk_size = 8 * 2;              // 8x __fp16 for d
+    const int mblk_size = 8 * 2;              // 8x __fp16 for m
+    const int qblk_size = qk / 2;             // int4
+    const int qrow_size = k / 2;              // int4 (not padded to blocks)
+    const int drow_size = (k + qk - 1) / qk * (qk / 32 * 2); // padded drow_size
+
+    uint8_t * y_q = y + 0;                    // quants first
+    uint8_t * y_d = y + qrow_size;            // then scales
+    uint8_t * y_m = y + qrow_size + drow_size; // then mins
+
+    // Repack the quants
+    for (int i = 0; i < nb; i++) {
+        uint8_t qs[QK_Q4_1x4x2];  // unpacked quants
+        unpack_q4_1_quants(qs, &x[i * 8 + 0], 0);
+        unpack_q4_1_quants(qs, &x[i * 8 + 1], 1);
+        unpack_q4_1_quants(qs, &x[i * 8 + 2], 2);
+        unpack_q4_1_quants(qs, &x[i * 8 + 3], 3);
+        unpack_q4_1_quants(qs, &x[i * 8 + 4], 4);
+        unpack_q4_1_quants(qs, &x[i * 8 + 5], 5);
+        unpack_q4_1_quants(qs, &x[i * 8 + 6], 6);
+        unpack_q4_1_quants(qs, &x[i * 8 + 7], 7);
+
+        bool partial = (nloe && i == nb-1);
+
+        uint8_t * q = y_q + (i * qblk_size);
+        for (int j = 0; j < qk / 2; j++) {
+            q[j] = partial ? (qs[j*2+1] << 4) | qs[j*2+0] : (qs[j+128] << 4) | qs[j+000];
+        }
+    }
+
+    // Repack the scales and minimums
+    for (int i = 0; i < nb; i++) {
+        // Repack the scales
+        ggml_half * d = (ggml_half *) (y_d + i * dblk_size);
+        d[0] = x[i * 8 + 0].d;
+        d[1] = x[i * 8 + 1].d;
+        d[2] = x[i * 8 + 2].d;
+        d[3] = x[i * 8 + 3].d;
+        d[4] = x[i * 8 + 4].d;
+        d[5] = x[i * 8 + 5].d;
+        d[6] = x[i * 8 + 6].d;
+        d[7] = x[i * 8 + 7].d;
+
+        // Repack the minimums
+        ggml_half * m = (ggml_half *) (y_m + i * mblk_size);
+        m[0] = x[i * 8 + 0].m;
+        m[1] = x[i * 8 + 1].m;
+        m[2] = x[i * 8 + 2].m;
+        m[3] = x[i * 8 + 3].m;
+        m[4] = x[i * 8 + 4].m;
+        m[5] = x[i * 8 + 5].m;
+        m[6] = x[i * 8 + 6].m;
+        m[7] = x[i * 8 + 7].m;
+    }
+}
+
+static void unpack_row_q4x4x2_q4_1(block_q4_1 * y, const uint8_t * x, int64_t k) {
+    static const int qk = QK_Q4_1x4x2;
+    const int        nb = (k + qk - 1) / qk;  // number of blocks (padded)
+    const int        nloe = k % qk;           // leftovers
+
+    const int dblk_size = 8 * 2;              // 8x __fp16 for d
+    const int mblk_size = 8 * 2;              // 8x __fp16 for m
+    const int qblk_size = qk / 2;             // int4
+    const int qrow_size = k / 2;              // int4 (not padded to blocks)
+    const int drow_size = (k + qk - 1) / qk * (qk / 32 * 2); // padded drow_size
+
+    const uint8_t * x_q = x + 0;                    // quants first
+    const uint8_t * x_d = x + qrow_size;            // then scales
+    const uint8_t * x_m = x + qrow_size + drow_size; // then mins
+
+    // Unpack the quants
+    for (int i = 0; i < nb; i++) {
+        uint8_t qs[QK_Q4_1x4x2];  // unpacked quants
+
+        bool partial = (nloe && i == nb-1);
+
+        const uint8_t * q = x_q + (i * qblk_size);
+        for (int j = 0; j < qk / 2; j++) {
+            if (partial) {
+                qs[j*2+0] = q[j] & 0x0F;
+                qs[j*2+1] = q[j] >> 4;
+            } else {
+                qs[j+000] = q[j] & 0x0F;
+                qs[j+128] = q[j] >> 4;
+            }
+        }
+
+        pack_q4_1_quants(&y[i * 8 + 0], qs, 0);
+        pack_q4_1_quants(&y[i * 8 + 1], qs, 1);
+        pack_q4_1_quants(&y[i * 8 + 2], qs, 2);
+        pack_q4_1_quants(&y[i * 8 + 3], qs, 3);
+        pack_q4_1_quants(&y[i * 8 + 4], qs, 4);
+        pack_q4_1_quants(&y[i * 8 + 5], qs, 5);
+        pack_q4_1_quants(&y[i * 8 + 6], qs, 6);
+        pack_q4_1_quants(&y[i * 8 + 7], qs, 7);
+    }
+
+    // Unpack the scales and minimums
+    for (int i = 0; i < nb; i++) {
+        // Unpack the scales
+        const ggml_half * d = (const ggml_half *) (x_d + i * dblk_size);
+        y[i * 8 + 0].d = d[0];
+        y[i * 8 + 1].d = d[1];
+        y[i * 8 + 2].d = d[2];
+        y[i * 8 + 3].d = d[3];
+        y[i * 8 + 4].d = d[4];
+        y[i * 8 + 5].d = d[5];
+        y[i * 8 + 6].d = d[6];
+        y[i * 8 + 7].d = d[7];
+
+        // Unpack the minimums
+        const ggml_half * m = (const ggml_half *) (x_m + i * mblk_size);
+        y[i * 8 + 0].m = m[0];
+        y[i * 8 + 1].m = m[1];
+        y[i * 8 + 2].m = m[2];
+        y[i * 8 + 3].m = m[3];
+        y[i * 8 + 4].m = m[4];
+        y[i * 8 + 5].m = m[5];
+        y[i * 8 + 6].m = m[6];
+        y[i * 8 + 7].m = m[7];
+    }
+}
+
+static inline void init_row_q4_1x4x2(block_q4_1 * x, int64_t k) {
+    const int nb = (k + QK_Q4_1x4x2 - 1) / QK_Q4_1x4x2;
+    memset(x, 0, nb * QK_Q4_1x4x2 / 2 + nb * 8 * 2 * 2);
+}
+
+static void repack_q4_1_q4x4x2(ggml_tensor * t, const void * data, size_t size) {
+    int64_t nrows = ggml_nrows(t);
+
+    size_t row_size    = ggml_row_size(t->type, t->ne[0]);
+    size_t row_size_pd = ggml_row_size(t->type, hex_round_up(t->ne[0], QK_Q4_1x4x2));  // extra elements for the pad
+    size_t row_size_rp = row_size * 2;  // extra space for tmp pad (if any)
+
+    const size_t total_tensor_size = (size_t)nrows * row_size;
+    const size_t n_bytes_to_copy = size < total_tensor_size ? size : total_tensor_size;
+
+    const int64_t n_full_rows = n_bytes_to_copy / row_size;
+    const size_t  n_rem_bytes = n_bytes_to_copy % row_size;
+
+    void * buf_pd = ggml_aligned_malloc(row_size_pd);
+    GGML_ASSERT(buf_pd != NULL);
+
+    void * buf_rp = ggml_aligned_malloc(row_size_rp);
+    GGML_ASSERT(buf_rp != NULL);
+
+    HEX_VERBOSE("ggml-hex: repack-q4_1-q4x4x2 %s : data %p size %zu dims %ldx%ld row-size %zu\n", t->name, data, size,
+                t->ne[0], nrows, row_size);
+
+    init_row_q4_1x4x2((block_q4_1 *) buf_pd, t->ne[0]);
+
+    for (int64_t i = 0; i < n_full_rows; i++) {
+        const uint8_t * src = (const uint8_t *) data + (i * row_size);
+        uint8_t *       dst = (uint8_t *) t->data + (i * row_size);
+
+        memcpy(buf_pd, src, row_size);
+        repack_row_q4x4x2_q4_1((uint8_t *) buf_rp, (const block_q4_1 *) buf_pd, t->ne[0]);
+        memcpy(dst, buf_rp, row_size);
+    }
+
+    if (n_rem_bytes > 0) {
+        const int64_t i = n_full_rows;
+        const uint8_t * src = (const uint8_t *) data + (i * row_size);
+        uint8_t *       dst = (uint8_t *) t->data + (i * row_size);
+
+        init_row_q4_1x4x2((block_q4_1 *) buf_pd, t->ne[0]);
+        memcpy(buf_pd, src, n_rem_bytes);
+        repack_row_q4x4x2_q4_1((uint8_t *) buf_rp, (const block_q4_1 *) buf_pd, t->ne[0]);
+        memcpy(dst, buf_rp, n_rem_bytes);
+    }
+
+    ggml_aligned_free(buf_pd, row_size_pd);
+    ggml_aligned_free(buf_rp, row_size_rp);
+}
+
+static void repack_q4x4x2_q4_1(void * data, const ggml_tensor * t, size_t size) {
+    int64_t nrows = ggml_nrows(t);
+
+    size_t row_size    = ggml_row_size(t->type, t->ne[0]);
+    size_t row_size_pd = ggml_row_size(t->type, hex_round_up(t->ne[0], QK_Q4_1x4x2));  // extra elements for the pad
+    size_t row_size_rp = row_size * 2;  // extra space for tmp pad (if any)
+
+    const size_t total_tensor_size = (size_t)nrows * row_size;
+    const size_t n_bytes_to_copy = size < total_tensor_size ? size : total_tensor_size;
+
+    const int64_t n_full_rows = n_bytes_to_copy / row_size;
+    const size_t  n_rem_bytes = n_bytes_to_copy % row_size;
+
+    void * buf_pd = ggml_aligned_malloc(row_size_pd);
+    GGML_ASSERT(buf_pd != NULL);
+
+    void * buf_rp = ggml_aligned_malloc(row_size_rp);
+    GGML_ASSERT(buf_rp != NULL);
+
+    HEX_VERBOSE("ggml-hex: repack-q4x4x2-q4_1 %s : data %p size %zu dims %ldx%ld row-size %zu\n", t->name, data, size,
+                t->ne[0], nrows, row_size);
+
+    memset(buf_pd, 0, row_size_pd);
+
+    for (int64_t i = 0; i < n_full_rows; i++) {
+        const uint8_t * src = (const uint8_t *) t->data + (i * row_size);
+        uint8_t *       dst = (uint8_t *) data + (i * row_size);
+
+        memcpy(buf_pd, src, row_size);
+        unpack_row_q4x4x2_q4_1((block_q4_1 *) buf_rp, (const uint8_t *) buf_pd, t->ne[0]);
+        memcpy(dst, buf_rp, row_size);
+    }
+
+    if (n_rem_bytes > 0) {
+        const int64_t i = n_full_rows;
+        const uint8_t * src = (const uint8_t *) t->data + (i * row_size);
+        uint8_t *       dst = (uint8_t *) data + (i * row_size);
+
+        memcpy(buf_pd, src, n_rem_bytes);
+        unpack_row_q4x4x2_q4_1((block_q4_1 *) buf_rp, (const uint8_t *) buf_pd, t->ne[0]);
+        memcpy(dst, buf_rp, n_rem_bytes);
+    }
+
+    ggml_aligned_free(buf_pd, row_size_pd);
+    ggml_aligned_free(buf_rp, row_size_rp);
+}
+
 
 // repack q4x4x2 tensor into q4_0 data
 static void repack_q4x4x2_q4_0(void * data, const ggml_tensor * t, size_t size) {
@@ -1365,6 +1609,12 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             repack_q4_0_q4x4x2(tensor, data, size);
             break;
 
+        case GGML_TYPE_Q4_1:
+            GGML_ASSERT(offset == 0);
+            GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
+            repack_q4_1_q4x4x2(tensor, data, size);
+            break;
+
         case GGML_TYPE_Q8_0:
             GGML_ASSERT(offset == 0);
             GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
@@ -1405,6 +1655,12 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
             GGML_ASSERT(offset == 0);
             GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
             repack_q4x4x2_q4_0(data, tensor, size);
+            break;
+
+        case GGML_TYPE_Q4_1:
+            GGML_ASSERT(offset == 0);
+            GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
+            repack_q4x4x2_q4_1(data, tensor, size);
             break;
 
         case GGML_TYPE_Q8_0:
@@ -2327,6 +2583,7 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
 
     switch (src0->type) {
         case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_MXFP4:
@@ -2377,6 +2634,7 @@ static bool ggml_hexagon_supported_mul_mat_id(const struct ggml_hexagon_session 
 
     switch (src0->type) {
         case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_MXFP4:
@@ -3557,6 +3815,8 @@ template<typename T, int BASE=10> std::string vec_to_str(std::vector<T> v) {
 static void ggml_hexagon_init(ggml_backend_reg * reg) {
     // Basic sanity checks to make sure definitions match
     static_assert((unsigned int) HTP_TYPE_Q4_0 == (unsigned int) GGML_TYPE_Q4_0,
+                  "please update hexagon_type to match ggml_type");
+    static_assert((unsigned int) HTP_TYPE_Q4_1 == (unsigned int) GGML_TYPE_Q4_1,
                   "please update hexagon_type to match ggml_type");
     static_assert((unsigned int) HTP_TYPE_Q8_0 == (unsigned int) GGML_TYPE_Q8_0,
                   "please update hexagon_type to match ggml_type");

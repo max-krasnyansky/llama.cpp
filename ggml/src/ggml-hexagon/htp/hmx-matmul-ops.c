@@ -62,6 +62,8 @@ static inline size_t get_x4x2_row_stride(int weight_type, int k) {
         case HTP_TYPE_Q4_0:
         case HTP_TYPE_IQ4_NL:
             return (size_t) nb * (QK_Q4_0x4x2 / 2 + HMX_X4X2_DBLK_SIZE);         // 144 * nb
+        case HTP_TYPE_Q4_1:
+            return (size_t) nb * (QK_Q4_1x4x2 / 2 + HMX_X4X2_DBLK_SIZE + HMX_X4X2_DBLK_SIZE);  // 160 * nb
         case HTP_TYPE_Q8_0:
             return (size_t) nb * (QK_Q8_0x4x2 + HMX_X4X2_DBLK_SIZE);             // 272 * nb
         case HTP_TYPE_MXFP4:
@@ -176,6 +178,53 @@ next_nc:
 }
 
 // --- x4x2 format dequantizers ---
+
+
+static inline HVX_Vector dequantize_x4x2_q4_1_group_hvx(
+         const uint8_t *packed_32, bool upper_nibbles,
+         const __fp16 *scale, const __fp16 *min, const HVX_Vector vlut_cvt) {
+    HVX_Vector vq = hvx_vmemu(packed_32);
+    const HVX_Vector mask_h4 = Q6_Vb_vsplat_R(0x0F);
+    HVX_Vector v_scales = hvx_vec_splat_f16(*scale);
+    HVX_Vector v_mins = hvx_vec_splat_f16(*min);
+    // q4x4x2 stores two int4 values per byte. Keep only the selected nibble.
+    HVX_Vector v_quants =  Q6_Vub_vlsr_VubR(vq, 4 * upper_nibbles);
+    v_quants = Q6_V_vand_VV(v_quants, mask_h4);
+    // Shuffle before LUT
+    v_quants = Q6_Vb_vshuff_Vb(v_quants);
+    HVX_VectorPair vp = Q6_Wh_vlut16_VbVhR(v_quants, vlut_cvt, 0);
+    HVX_Vector v_hf = Q6_V_lo_W(vp);
+
+    HVX_Vector v_scaled = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(v_hf, v_scales));
+    return Q6_Vhf_vadd_VhfVhf(v_scaled, v_mins);
+}
+
+static inline void dequantize_x4x2_q4_1_x4groups_hvx(
+            const uint8_t *packed_128, bool upper_nibbles,
+            const __fp16 *scales_4, const __fp16 *mins_4, const HVX_Vector vlut_cvt,
+            HVX_Vector out[4]) {
+    HVX_Vector vq = hvx_vmemu(packed_128);
+    const HVX_Vector mask_h4 = Q6_Vb_vsplat_R(0x0F);
+    HVX_Vector v_quants = Q6_Vub_vlsr_VubR(vq, 4 * upper_nibbles);
+    v_quants = Q6_V_vand_VV(v_quants, mask_h4);
+
+    // Shuffle before LUT
+    v_quants = Q6_Vb_vshuff_Vb(v_quants);
+
+    HVX_Vector v_scales = Q6_Vh_vdeal_Vh(Q6_V_vshuff_Vb(*(const HVX_UVector *) scales_4));
+    HVX_Vector v_mins = Q6_Vh_vdeal_Vh(Q6_V_vshuff_Vb(*(const HVX_UVector *) mins_4));
+
+    HVX_VectorPair vp0 = Q6_Wh_vlut16_VbVhR(v_quants, vlut_cvt, 0);
+    HVX_VectorPair vp1 = Q6_Wh_vlut16_VbVhR(v_quants, vlut_cvt, 1);
+    HVX_VectorPair vp2 = Q6_Wh_vlut16_VbVhR(v_quants, vlut_cvt, 2);
+    HVX_VectorPair vp3 = Q6_Wh_vlut16_VbVhR(v_quants, vlut_cvt, 3);
+
+    out[0] = Q6_Vhf_vadd_VhfVhf(Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(Q6_V_lo_W(vp0), v_scales)), v_mins);
+    out[1] = Q6_Vhf_vadd_VhfVhf(Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(Q6_V_hi_W(vp0), v_scales)), v_mins);
+    out[2] = Q6_Vhf_vadd_VhfVhf(Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(Q6_V_lo_W(vp1), v_scales)), v_mins);
+    out[3] = Q6_Vhf_vadd_VhfVhf(Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(Q6_V_hi_W(vp1), v_scales)), v_mins);
+}
+
 
 // Dequantize one x4x2 Q4_0 group (32 elements from 32 packed bytes) -> 32 FP16 in first 64 bytes.
 // In x4x2, sub-blocks 0..3 use lower nibbles, sub-blocks 4..7 use upper nibbles
@@ -336,7 +385,7 @@ static void dequantize_x4x2_weight_to_fp16_tiles_task(
         int start_tile, int end_tile) {
 
     const int n_k_tiles = (unsigned)k_block / HMX_FP16_TILE_N_COLS;
-    const bool is_q4 = (weight_type == HTP_TYPE_Q4_0 || weight_type == HTP_TYPE_IQ4_NL);
+    const bool is_q4 = (weight_type == HTP_TYPE_Q4_0 || weight_type == HTP_TYPE_Q4_1 || weight_type == HTP_TYPE_IQ4_NL);
     const int qrow_size = is_q4 ? ((unsigned)k_block / 2) : k_block;
 
     const HVX_Vector vlut_cvt = (weight_type == HTP_TYPE_IQ4_NL) ? hvx_vmem(iq4_nl_to_fp16_lut) :
@@ -363,6 +412,8 @@ static void dequantize_x4x2_weight_to_fp16_tiles_task(
             unsigned packed_off   = blk_idx * (QK_Q4_0x4x2 / 2);     // 128 contiguous packed bytes
             unsigned scale_off    = qrow_size + blk_idx * HMX_X4X2_DBLK_SIZE
                                   + sub_blk_base * (int)sizeof(__fp16);   // 4 consecutive scales
+            unsigned min_off      = qrow_size + (k_block / 16) + blk_idx * HMX_X4X2_DBLK_SIZE
+                                  + sub_blk_base * (int)sizeof(__fp16);   // 4 consecutive mins
 
             __fp16 *tile_bases[4];
             for (unsigned g = 0; g < 4; g++) { tile_bases[g] = vtcm_dst + (t + g) * HMX_FP16_TILE_N_ELMS; }
@@ -375,14 +426,22 @@ static void dequantize_x4x2_weight_to_fp16_tiles_task(
             for (int r = 0; r < HMX_FP16_TILE_N_ROWS; r += 2, row1 += 2) {
                 HVX_Vector v0[2];
                 const uint8_t *r0 = vtcm_src + row_offset; row_offset += row_stride;
-                dequantize_x4x2_q4_0_x4groups_hvx(r0 + packed_off, upper, (const __fp16 *)(r0 + scale_off), vlut_cvt, v0);
+                if (weight_type == HTP_TYPE_Q4_1) {
+                    dequantize_x4x2_q4_1_x4groups_hvx(r0 + packed_off, upper, (const __fp16 *)(r0 + scale_off), (const __fp16 *)(r0 + min_off), vlut_cvt, v0);
+                } else {
+                    dequantize_x4x2_q4_0_x4groups_hvx(r0 + packed_off, upper, (const __fp16 *)(r0 + scale_off), vlut_cvt, v0);
+                }
                 Q6_vscatter_RMVwV((size_t)tile_bases[0], 2 * HMX_FP16_TILE_SIZE - 1, v_off, v0[0]);
                 Q6_vscatter_RMVwV((size_t)tile_bases[2], 2 * HMX_FP16_TILE_SIZE - 1, v_off, v0[1]);
                 v_off = Q6_Vw_vadd_VwVw(v_off, v_scat_step);
 
 
                 r0 = vtcm_src + row_offset; row_offset += row_stride;
-                dequantize_x4x2_q4_0_x4groups_hvx(r0 + packed_off, upper, (const __fp16 *)(r0 + scale_off), vlut_cvt, v0);
+                if (weight_type == HTP_TYPE_Q4_1) {
+                    dequantize_x4x2_q4_1_x4groups_hvx(r0 + packed_off, upper, (const __fp16 *)(r0 + scale_off), (const __fp16 *)(r0 + min_off), vlut_cvt, v0);
+                } else {
+                    dequantize_x4x2_q4_0_x4groups_hvx(r0 + packed_off, upper, (const __fp16 *)(r0 + scale_off), vlut_cvt, v0);
+                }
                 Q6_vscatter_RMVwV((size_t)tile_bases[0], 2 * HMX_FP16_TILE_SIZE - 1, v_off, v0[0]);
                 Q6_vscatter_RMVwV((size_t)tile_bases[2], 2 * HMX_FP16_TILE_SIZE - 1, v_off, v0[1]);
                 v_off = Q6_Vw_vadd_VwVw(v_off, v_scat_step);
@@ -452,6 +511,7 @@ static void dequantize_x4x2_weight_to_fp16_tiles_task(
             bool upper         = (sub_blk >= 4);
             unsigned byte_off  = blk_idx * (QK_Q4_0x4x2 / 2) + (upper ? (sub_blk - 4) : sub_blk) * 32;
             unsigned scale_off = qrow_size + blk_idx * HMX_X4X2_DBLK_SIZE + sub_blk * (int)sizeof(__fp16);
+            unsigned min_off   = qrow_size + (k_block / 16) + blk_idx * HMX_X4X2_DBLK_SIZE + sub_blk * (int)sizeof(__fp16);
 
             HVX_Vector v_off = v_scat_base;  // reset to column 0
             unsigned row_offset = ct * HMX_FP16_TILE_N_COLS * row_stride;
@@ -460,12 +520,22 @@ static void dequantize_x4x2_weight_to_fp16_tiles_task(
                 const uint8_t *r0 = vtcm_src + row_offset; row_offset += row_stride;
                 const uint8_t *r1 = vtcm_src + row_offset; row_offset += row_stride;
 
-                HVX_Vector v0 = dequantize_x4x2_q4_0_group_hvx(
-                    r0 + byte_off, upper, (const __fp16 *)(r0 + scale_off), vlut_cvt);
-                HVX_Vector v1 = (row1 < n_cols)
-                    ? dequantize_x4x2_q4_0_group_hvx(
-                        r1 + byte_off, upper, (const __fp16 *)(r1 + scale_off), vlut_cvt)
-                    : Q6_V_vzero();
+                HVX_Vector v0, v1;
+                if (weight_type == HTP_TYPE_Q4_1) {
+                    v0 = dequantize_x4x2_q4_1_group_hvx(
+                        r0 + byte_off, upper, (const __fp16 *)(r0 + scale_off), (const __fp16 *)(r0 + min_off), vlut_cvt);
+                    v1 = (row1 < n_cols)
+                        ? dequantize_x4x2_q4_1_group_hvx(
+                            r1 + byte_off, upper, (const __fp16 *)(r1 + scale_off), (const __fp16 *)(r1 + min_off), vlut_cvt)
+                        : Q6_V_vzero();
+                } else {
+                    v0 = dequantize_x4x2_q4_0_group_hvx(
+                        r0 + byte_off, upper, (const __fp16 *)(r0 + scale_off), vlut_cvt);
+                    v1 = (row1 < n_cols)
+                        ? dequantize_x4x2_q4_0_group_hvx(
+                            r1 + byte_off, upper, (const __fp16 *)(r1 + scale_off), vlut_cvt)
+                        : Q6_V_vzero();
+                }
 
                 Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, HMX_FP16_TILE_SIZE - 1, v_off, v0);
                 v_off = Q6_Vw_vadd_VwVw(v_off, v_scat_step);
@@ -1018,6 +1088,13 @@ static __attribute__((noinline)) int mat_mul_qk_0_d16a32_out_stationary(struct h
                     dma_queue_push(ctx->dma[0], dma_make_ptr(dst, src + quant_off), dst_stride, src_stride, quant_width, n_rows);
                     // 2D DMA: scales sub-range
                     dma_queue_push(ctx->dma[0], dma_make_ptr(dst + quant_width, src + scale_off), dst_stride, src_stride, scale_width, n_rows);
+
+                    if (weight_type == HTP_TYPE_Q4_1) {
+                        const size_t full_drow = k / 16;
+                        const size_t min_off   = full_qrow + full_drow + blk_start * scale_blk_size;
+                        const size_t min_width = nb_sub * scale_blk_size;
+                        dma_queue_push(ctx->dma[0], dma_make_ptr(dst + quant_width + scale_width, src + min_off), dst_stride, src_stride, min_width, n_rows);
+                    }
                 }
                 TIMER_STOP(fetch);
 
