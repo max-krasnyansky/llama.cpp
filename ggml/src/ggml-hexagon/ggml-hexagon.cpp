@@ -2839,6 +2839,7 @@ static htp_op_code op_remap_to_htp(const ggml_tensor * t) {
         case GGML_OP_DIV:             return HTP_OP_DIV;
         case GGML_OP_CPY:             return HTP_OP_CPY;
         case GGML_OP_CONT:            return HTP_OP_CPY;
+        case GGML_OP_CONCAT:          return HTP_OP_CONCAT;
         case GGML_OP_GET_ROWS:        return HTP_OP_GET_ROWS;
         case GGML_OP_SET_ROWS:        return HTP_OP_SET_ROWS;
         case GGML_OP_SUM_ROWS:        return HTP_OP_SUM_ROWS;
@@ -3220,6 +3221,20 @@ static bool ggml_hexagon_supported_cpy(const struct ggml_hexagon_session * sess,
     return true;
 }
 
+static bool ggml_hexagon_supported_concat(const struct ggml_hexagon_session * sess, const struct ggml_tensor * op) {
+    GGML_UNUSED(sess);
+    const struct ggml_tensor * src0 = op->src[0];
+    const struct ggml_tensor * dst  = op;
+
+    // CONCAT supports f32 and f16
+    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) return false;
+
+    // src and dst must be the same type
+    if (src0->type != dst->type) return false;
+
+    return true;
+}
+
 static bool ggml_hexagon_supported_cont(const struct ggml_hexagon_session * sess, const struct ggml_tensor * op) {
     GGML_UNUSED(sess);
     const struct ggml_tensor * src0 = op->src[0];
@@ -3400,6 +3415,10 @@ static bool ggml_backend_hexagon_device_supports_op(ggml_backend_dev_t dev, cons
 
         case GGML_OP_CUMSUM:
             supp = ggml_hexagon_supported_cumsum(sess, op);
+            break;
+
+        case GGML_OP_CONCAT:
+            supp = ggml_hexagon_supported_concat(sess, op);
             break;
 
         case GGML_OP_FILL:
