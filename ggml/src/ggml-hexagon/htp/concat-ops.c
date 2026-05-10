@@ -13,6 +13,7 @@
 #include "htp-ctx.h"
 #include "htp-ops.h"
 #include "hex-dma.h"
+#include "hex-fastdiv.h"
 #include "hvx-utils.h"
 #include "vtcm-utils.h"
 
@@ -26,6 +27,9 @@ struct htp_concat_context {
 
     uint32_t src0_dim_ne;
     uint32_t src1_dim_ne;
+
+    struct fastdiv_values fastdiv_ne1;
+    struct fastdiv_values fastdiv_ne12;
 
     uint32_t elements_per_chunk; // Used for double buffering block size inside a single row
 };
@@ -80,9 +84,9 @@ static void concat_job_per_thread(unsigned int nth, unsigned int ith, void * dat
     uint8_t * vtcm_buf[2] = {vtcm_ping, vtcm_pong};
 
     for (uint32_t flat_idx = row_start; flat_idx < row_end; flat_idx++) {
-        uint32_t i1 = flat_idx % ne1;
-        uint32_t i2 = (flat_idx / ne1) % ne2;
-        uint32_t i3 = flat_idx / (ne1 * ne2);
+        uint32_t i1 = fastmodulo(flat_idx, ne1, &cctx->fastdiv_ne1);
+        uint32_t i2 = fastmodulo(fastdiv(flat_idx, ne1, &cctx->fastdiv_ne1), ne2, &cctx->fastdiv_ne12);
+        uint32_t i3 = fastdiv(flat_idx, ne1 * ne2, &cctx->fastdiv_ne12);
 
         uint32_t blocks = (ne0 + cctx->elements_per_chunk - 1) / cctx->elements_per_chunk;
 
@@ -182,9 +186,10 @@ int op_concat(struct htp_ops_context * octx) {
     octx->src0_spad.size_per_thread = row_size_aligned;
     octx->src0_spad.size = n_threads * row_size_aligned;
 
-    if (vtcm_alloc_spad(&octx->src0_spad, octx->ctx) != HTP_STATUS_OK) {
+    if (octx->src0_spad.size > octx->ctx->vtcm_size) {
         return HTP_STATUS_VTCM_TOO_SMALL;
     }
+    octx->src0_spad.data = octx->ctx->vtcm_base;
 
     struct htp_concat_context cctx;
     cctx.octx = octx;
@@ -194,6 +199,10 @@ int op_concat(struct htp_ops_context * octx) {
     cctx.total_rows = total_rows;
     cctx.src0_dim_ne = src0->ne[dim];
     cctx.src1_dim_ne = src1->ne[dim];
+
+    cctx.fastdiv_ne1 = init_fastdiv_values(dst->ne[1]);
+    cctx.fastdiv_ne12 = init_fastdiv_values(dst->ne[1] * dst->ne[2]);
+
     cctx.elements_per_chunk = elements_per_chunk;
 
     worker_pool_run_func(octx->ctx->worker_pool, concat_job_per_thread, &cctx, n_threads);
