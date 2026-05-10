@@ -64,6 +64,10 @@ int hmx_mat_mul_permuted_qk_0_d16a32(struct htp_context *ctx,
 // HMX flash attention
 int hmx_flash_attn_ext(struct htp_ops_context * octx);
 
+// HMX gated delta net
+int hmx_gated_delta_net_ext(struct htp_ops_context * octx);
+
+
 #ifdef __cplusplus
 }
 #endif
