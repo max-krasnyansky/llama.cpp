@@ -172,7 +172,7 @@ int hmx_gated_delta_net_ext(struct htp_ops_context * octx) {
                     }
                 }
 
-                HAP_compute_res_hmx_lock(ctx->vtcm_rctx);
+
 
 
                         // Convert state (s_out) from F32 to F16 before interleaving
@@ -191,18 +191,17 @@ int hmx_gated_delta_net_ext(struct htp_ops_context * octx) {
                     .S_v = S_v
                 };
 
-                hmx_queue_push(ctx->hmx_queue, hmx_queue_make_desc(hmx_gdn_worker, &job));
-                hmx_queue_pop(ctx->hmx_queue);
-
-                hmx_queue_suspend(ctx->hmx_queue);
+                HAP_compute_res_hmx_lock(ctx->vtcm_rctx);
+                hmx_gdn_worker(&job);
                 HAP_compute_res_hmx_unlock(ctx->vtcm_rctx);
 
-                // Read output back
-                // vtcm_attn is interleaved. Since it's n_tiles x 1 tile (S_v x 32), we can just read the first column.
-                for (uint32_t r = 0; r < S_v; ++r) {
-                    size_t tile_idx = r / 32;
-                    size_t row_in_tile = r % 32;
-                    attn_data[t * S_v + r] = (float) vtcm_attn[tile_idx * HMX_FP16_TILE_N_ELMS + row_in_tile];
+
+                // Extract row 0 from HMX column-major tiles
+                // In HMX output, each 32x32 tile is essentially column-major, where each column is 32 contiguous elements.
+                for (uint32_t c = 0; c < S_v; ++c) {
+                    size_t tile_idx = c / 32;
+                    size_t col_in_tile = c % 32;
+                    attn_data[t * S_v + c] = (float) vtcm_attn[tile_idx * HMX_FP16_TILE_N_ELMS + col_in_tile * 32 + 0];
                 }
             }
         }
