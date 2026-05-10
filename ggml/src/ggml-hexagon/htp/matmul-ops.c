@@ -1069,7 +1069,8 @@ static void vec_dot_q4_1x4x2_q8_1x4x2_1x1(const int n, float * restrict s0, cons
         r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_fa, r0_sum));
     }
 
-    *s0 = *(float *)&hvx_vec_reduce_sum_f32(r0_sum);
+    HVX_Vector s0_vec = hvx_vec_reduce_sum_f32(r0_sum);
+    hvx_vec_store_u(s0, 4, s0_vec);
 }
 
 static void vec_dot_q4_1x4x2_q8_1x4x2_2x1(const int n, float * restrict s0,
@@ -1168,8 +1169,10 @@ static void vec_dot_q4_1x4x2_q8_1x4x2_2x1(const int n, float * restrict s0,
         r1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_fa, r1_sum));
     }
 
-    s0[0] = *(float *)&hvx_vec_reduce_sum_f32(r0_sum);
-    s0[1] = *(float *)&hvx_vec_reduce_sum_f32(r1_sum);
+    HVX_Vector s0_vec = hvx_vec_reduce_sum_f32(r0_sum);
+    HVX_Vector s1_vec = hvx_vec_reduce_sum_f32(r1_sum);
+    hvx_vec_store_u(&s0[0], 4, s0_vec);
+    hvx_vec_store_u(&s0[1], 4, s1_vec);
 }
 
 static void vec_dot_q4_1x4x2_q8_1x4x2_2x2(const int n, float * restrict s0, float * restrict s1,
@@ -1308,10 +1311,15 @@ static void vec_dot_q4_1x4x2_q8_1x4x2_2x2(const int n, float * restrict s0, floa
         r1_c1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_c1_fa, r1_c1_sum));
     }
 
-    s0[0] = *(float *)&hvx_vec_reduce_sum_f32(r0_c0_sum);
-    s0[1] = *(float *)&hvx_vec_reduce_sum_f32(r1_c0_sum);
-    s1[0] = *(float *)&hvx_vec_reduce_sum_f32(r0_c1_sum);
-    s1[1] = *(float *)&hvx_vec_reduce_sum_f32(r1_c1_sum);
+    HVX_Vector s0_c0_vec = hvx_vec_reduce_sum_f32(r0_c0_sum);
+    HVX_Vector s1_c0_vec = hvx_vec_reduce_sum_f32(r1_c0_sum);
+    HVX_Vector s0_c1_vec = hvx_vec_reduce_sum_f32(r0_c1_sum);
+    HVX_Vector s1_c1_vec = hvx_vec_reduce_sum_f32(r1_c1_sum);
+
+    hvx_vec_store_u(&s0[0], 4, s0_c0_vec);
+    hvx_vec_store_u(&s0[1], 4, s1_c0_vec);
+    hvx_vec_store_u(&s1[0], 4, s0_c1_vec);
+    hvx_vec_store_u(&s1[1], 4, s1_c1_vec);
 }
 
 
