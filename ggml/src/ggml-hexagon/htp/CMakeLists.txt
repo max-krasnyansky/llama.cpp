@@ -25,6 +25,7 @@ add_library(${HTP_LIB} SHARED
     sum-rows-ops.c
     softmax-ops.c
     act-ops.c
+    concat-ops.c
     rope-ops.c
     flash-attn-ops.c
     set-rows-ops.c
