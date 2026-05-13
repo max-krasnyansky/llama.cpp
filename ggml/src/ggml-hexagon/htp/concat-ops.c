@@ -85,8 +85,10 @@ static void concat_job_per_thread(unsigned int nth, unsigned int ith, void * dat
 
     for (uint32_t flat_idx = row_start; flat_idx < row_end; flat_idx++) {
         uint32_t i1 = fastmodulo(flat_idx, ne1, &cctx->fastdiv_ne1);
-        uint32_t i2 = fastmodulo(fastdiv(flat_idx, ne1, &cctx->fastdiv_ne1), ne2, &cctx->fastdiv_ne12);
-        uint32_t i3 = fastdiv(flat_idx, ne1 * ne2, &cctx->fastdiv_ne12);
+        uint32_t i123_div_ne1 = fastdiv(flat_idx, &cctx->fastdiv_ne1);
+        uint32_t i3 = fastdiv(flat_idx, &cctx->fastdiv_ne12);
+        uint32_t i2 = i123_div_ne1 - i3 * ne2;
+
 
         uint32_t blocks = (ne0 + cctx->elements_per_chunk - 1) / cctx->elements_per_chunk;
 
