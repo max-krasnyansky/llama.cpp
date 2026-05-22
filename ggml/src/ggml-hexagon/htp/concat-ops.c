@@ -149,7 +149,6 @@ int op_concat(struct htp_ops_context * octx) {
         case HTP_TYPE_F32: type_size = 4; break;
         case HTP_TYPE_F16: type_size = 2; break;
         case HTP_TYPE_I32: type_size = 4; break;
-        case HTP_TYPE_I8:  type_size = 1; break;
         default:
             return HTP_STATUS_NO_SUPPORT;
     }

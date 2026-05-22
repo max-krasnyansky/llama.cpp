@@ -3240,7 +3240,7 @@ static bool ggml_hexagon_supported_concat(const struct ggml_hexagon_session * se
 
     if (src0->type != src1->type || src0->type != dst->type) return false;
 
-    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_I32 && src0->type != GGML_TYPE_I8) {
+    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_I32) {
         return false;
     }
 
