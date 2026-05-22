@@ -577,6 +577,9 @@ static int execute_op(struct htp_ops_context * octx) {
         case HTP_OP_CPY:
             return op_cpy(octx);
 
+        case HTP_OP_CONCAT:
+            return op_concat(octx);
+
         case HTP_OP_REPEAT:
             return op_repeat(octx);
 

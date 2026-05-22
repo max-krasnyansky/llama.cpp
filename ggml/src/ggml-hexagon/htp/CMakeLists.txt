@@ -39,6 +39,7 @@ add_library(${HTP_LIB} SHARED
     solve-tri-ops.c
     gated-delta-net-ops.c
     pad-ops.c
+    concat-ops.c
 )
 
 target_compile_definitions(${HTP_LIB} PRIVATE
