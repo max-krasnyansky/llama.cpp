@@ -93,7 +93,9 @@ static void concat_thread(unsigned int nth, unsigned int ith, void *data) {
     const uint32_t row_start = ith * rows_per_th;
     const uint32_t row_end = MIN(row_start + rows_per_th, total_rows);
 
-    const bool is_contiguous_0 = (nb00 == type_size && nb10 == type_size && nb0 == type_size);
+    const bool is_contiguous_0 = (nb00 == type_size || ne00 == 1) &&
+                                 (nb10 == type_size || ne10 == 1) &&
+                                 (nb0  == type_size || ne0  == 1);
 
     for (uint32_t r = row_start; r < row_end; ++r) {
         uint32_t rem = r;
