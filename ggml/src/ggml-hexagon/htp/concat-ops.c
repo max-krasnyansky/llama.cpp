@@ -93,6 +93,8 @@ static void concat_thread(unsigned int nth, unsigned int ith, void *data) {
     const uint32_t row_start = ith * rows_per_th;
     const uint32_t row_end = MIN(row_start + rows_per_th, total_rows);
 
+    const bool is_contiguous_0 = (nb00 == type_size && nb10 == type_size && nb0 == type_size);
+
     for (uint32_t r = row_start; r < row_end; ++r) {
         uint32_t rem = r;
         const uint32_t i1 = rem % ne1;
@@ -101,28 +103,43 @@ static void concat_thread(unsigned int nth, unsigned int ith, void *data) {
         rem /= ne2;
         const uint32_t i3 = rem % ne3;
 
-        if (dim == 0) {
-            // copy row from src0, then row from src1
-            char * y0 = (char *)dst->data + i1*nb1 + i2*nb2 + i3*nb3;
-            char * y1 = y0 + ne00 * type_size;
+        if (is_contiguous_0) {
+            if (dim == 0) {
+                // copy row from src0, then row from src1
+                char * y0 = (char *)dst->data + i1*nb1 + i2*nb2 + i3*nb3;
+                char * y1 = y0 + ne00 * type_size;
 
-            const char * x0 = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
-            const char * x1 = (const char *)src1->data + i1*nb11 + i2*nb12 + i3*nb13;
+                const char * x0 = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
+                const char * x1 = (const char *)src1->data + i1*nb11 + i2*nb12 + i3*nb13;
 
-            hvx_copy_uu((uint8_t*)y0, (const uint8_t*)x0, ne00, type_size);
-            hvx_copy_uu((uint8_t*)y1, (const uint8_t*)x1, src1->ne[0], type_size);
-        } else {
-            // dim != 0
-            // The row is either entirely from src0 or entirely from src1
-            const char * x;
-            if (i1 < ne01 && i2 < ne02 && i3 < ne03) {
-                x = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
+                hvx_copy_uu((uint8_t*)y0, (const uint8_t*)x0, ne00, type_size);
+                hvx_copy_uu((uint8_t*)y1, (const uint8_t*)x1, src1->ne[0], type_size);
             } else {
-                x = (const char *)src1->data + (i1 - o[1])*nb11 + (i2 - o[2])*nb12 + (i3 - o[3])*nb13;
-            }
-            char * y = (char *)dst->data + i1*nb1 + i2*nb2 + i3*nb3;
+                // dim != 0
+                // The row is either entirely from src0 or entirely from src1
+                const char * x;
+                if (i1 < ne01 && i2 < ne02 && i3 < ne03) {
+                    x = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
+                } else {
+                    x = (const char *)src1->data + (i1 - o[1])*nb11 + (i2 - o[2])*nb12 + (i3 - o[3])*nb13;
+                }
+                char * y = (char *)dst->data + i1*nb1 + i2*nb2 + i3*nb3;
 
-            hvx_copy_uu((uint8_t*)y, (const uint8_t*)x, ne0, type_size);
+                hvx_copy_uu((uint8_t*)y, (const uint8_t*)x, ne0, type_size);
+            }
+        } else {
+            // non-contiguous dimension 0, fall back to element-wise copy
+            for (uint32_t i0 = 0; i0 < ne0; i0++) {
+                const char * x;
+                if (i0 < ne00 && i1 < ne01 && i2 < ne02 && i3 < ne03) {
+                    x = (const char *)src0->data + i0*nb00 + i1*nb01 + i2*nb02 + i3*nb03;
+                } else {
+                    x = (const char *)src1->data + (i0 - o[0])*nb10 + (i1 - o[1])*nb11 + (i2 - o[2])*nb12 + (i3 - o[3])*nb13;
+                }
+                char * y = (char *)dst->data + i0*nb0 + i1*nb1 + i2*nb2 + i3*nb3;
+
+                memcpy(y, x, type_size);
+            }
         }
     }
 
