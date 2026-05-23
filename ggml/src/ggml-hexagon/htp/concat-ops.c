@@ -126,11 +126,19 @@ static void concat_thread(unsigned int nth, unsigned int ith, void *data) {
             if (dim == 0) {
                 // Fetch ne00 elements from src0 directly to dst
                 const char * x0 = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
-                dma_queue_push(dma_queue, dma_make_ptr(y, x0), nb0, nb00, type_size, ne00);
+                size_t row_size0 = (nb00 == type_size && nb0 == type_size) ? ne00 * type_size : type_size;
+                size_t nrows0    = (nb00 == type_size && nb0 == type_size) ? 1 : ne00;
+                size_t sstr0     = (nb00 == type_size && nb0 == type_size) ? 0 : nb00;
+                size_t dstr0     = (nb00 == type_size && nb0 == type_size) ? 0 : nb0;
+                dma_queue_push(dma_queue, dma_make_ptr(y, x0), dstr0, sstr0, row_size0, nrows0);
 
                 // Fetch ne10 elements from src1 directly to offset dst
                 const char * x1 = (const char *)src1->data + i1*nb11 + i2*nb12 + i3*nb13;
-                dma_queue_push(dma_queue, dma_make_ptr(y + ne00 * nb0, x1), nb0, nb10, type_size, src1->ne[0]);
+                size_t row_size1 = (nb10 == type_size && nb0 == type_size) ? src1->ne[0] * type_size : type_size;
+                size_t nrows1    = (nb10 == type_size && nb0 == type_size) ? 1 : src1->ne[0];
+                size_t sstr1     = (nb10 == type_size && nb0 == type_size) ? 0 : nb10;
+                size_t dstr1     = (nb10 == type_size && nb0 == type_size) ? 0 : nb0;
+                dma_queue_push(dma_queue, dma_make_ptr(y + ne00 * nb0, x1), dstr1, sstr1, row_size1, nrows1);
 
                 dma_queue_pop(dma_queue);
                 dma_queue_pop(dma_queue);
@@ -145,7 +153,11 @@ static void concat_thread(unsigned int nth, unsigned int ith, void *data) {
                     x = (const char *)src1->data + (i1 - o[1])*nb11 + (i2 - o[2])*nb12 + (i3 - o[3])*nb13;
                     src_stride = nb10;
                 }
-                dma_queue_push(dma_queue, dma_make_ptr(y, x), nb0, src_stride, type_size, ne0);
+                size_t row_size = (src_stride == type_size && nb0 == type_size) ? ne0 * type_size : type_size;
+                size_t nrows    = (src_stride == type_size && nb0 == type_size) ? 1 : ne0;
+                size_t sstr     = (src_stride == type_size && nb0 == type_size) ? 0 : src_stride;
+                size_t dstr     = (src_stride == type_size && nb0 == type_size) ? 0 : nb0;
+                dma_queue_push(dma_queue, dma_make_ptr(y, x), dstr, sstr, row_size, nrows);
                 dma_queue_pop(dma_queue);
             }
         }
