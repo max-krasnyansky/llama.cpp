@@ -481,7 +481,7 @@ static void vec_dot_q4_1x4x2_q8_1x4x2_1x1(const int n, float * restrict s0, cons
     }
 
     // Reduce sum
-    *s0 = hvx_vec_reduce_add_f32_scalar(r0_sum);
+    *s0 = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r0_sum));
 }
 
 static void vec_dot_q4x4x2_q8x4x2_1x1(const int n, float * restrict s0, const void * restrict vx0, const void * restrict vy0) {
@@ -666,8 +666,8 @@ static void vec_dot_q4_1x4x2_q8_1x4x2_2x1(const int n, float * restrict s0,
         r1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_fa, r1_sum));
     }
 
-    s0[0] = hvx_vec_reduce_add_f32_scalar(r0_sum);
-    s0[1] = hvx_vec_reduce_add_f32_scalar(r1_sum);
+    s0[0] = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r0_sum));
+    s0[1] = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r1_sum));
 }
 
 static void vec_dot_q4x4x2_q8x4x2_2x1(const int n, float * restrict s0,
@@ -914,10 +914,10 @@ static void vec_dot_q4_1x4x2_q8_1x4x2_2x2(const int n, float * restrict s0, floa
         r11_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r11_fa, r11_sum));
     }
 
-    s0[0] = hvx_vec_reduce_add_f32_scalar(r00_sum);
-    s0[1] = hvx_vec_reduce_add_f32_scalar(r10_sum);
-    s1[0] = hvx_vec_reduce_add_f32_scalar(r01_sum);
-    s1[1] = hvx_vec_reduce_add_f32_scalar(r11_sum);
+    s0[0] = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r00_sum));
+    s0[1] = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r10_sum));
+    s1[0] = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r01_sum));
+    s1[1] = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r11_sum));
 }
 
 static void vec_dot_q4x4x2_q8x4x2_2x2(const int n, float * restrict s0, float * restrict s1,
@@ -2978,8 +2978,10 @@ static inline void quantize_block_f32_q8_1x1(float * restrict x, uint8_t * restr
     vx23_hf              = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(vx23_hf, vd23_inv_hf));
 
     // Convert back to integer types
-    HVX_Vector vi01_b = Q6_Vb_vshuffe_VbVb(zero, Q6_Vb_vdeal_Vb(Q6_Vb_vshuffe_VbVb(zero, Q6_V_equals_Vhf(vx01_hf))));
-    HVX_Vector vi23_b = Q6_Vb_vshuffe_VbVb(zero, Q6_Vb_vdeal_Vb(Q6_Vb_vshuffe_VbVb(zero, Q6_V_equals_Vhf(vx23_hf))));
+    HVX_VectorPair vi01_wp = Q6_Ww_vcvt_VhfR(vx01_hf, 0);
+    HVX_Vector vi01_b = Q6_Vb_vshuffe_VbVb(zero, Q6_Vb_vdeal_Vb(Q6_Vb_vshuffe_VbVb(Q6_V_hi_W(vi01_wp), Q6_V_lo_W(vi01_wp))));
+    HVX_VectorPair vi23_wp = Q6_Ww_vcvt_VhfR(vx23_hf, 0);
+    HVX_Vector vi23_b = Q6_Vb_vshuffe_VbVb(zero, Q6_Vb_vdeal_Vb(Q6_Vb_vshuffe_VbVb(Q6_V_hi_W(vi23_wp), Q6_V_lo_W(vi23_wp))));
 
     *(HVX_UVector *) (y_q + 0)  = vi01_b;
     *(HVX_UVector *) (y_q + 64) = vi23_b;
@@ -3000,10 +3002,10 @@ static inline void quantize_block_f32_q8_1x1(float * restrict x, uint8_t * restr
 
     // We can do this efficiently by converting sum01_w to qf32 and accumulating,
     // but the easiest is just hvx_vec_reduce_add_f32 on the original input since s = d * sum(qs) = sum(x)
-    HVX_Vector sum_sf_0 = hvx_vec_reduce_add_f32(vx[0]);
-    HVX_Vector sum_sf_1 = hvx_vec_reduce_add_f32(vx[1]);
-    HVX_Vector sum_sf_2 = hvx_vec_reduce_add_f32(vx[2]);
-    HVX_Vector sum_sf_3 = hvx_vec_reduce_add_f32(vx[3]);
+    HVX_Vector sum_sf_0 = hvx_vec_reduce_sum_f32(vx[0]);
+    HVX_Vector sum_sf_1 = hvx_vec_reduce_sum_f32(vx[1]);
+    HVX_Vector sum_sf_2 = hvx_vec_reduce_sum_f32(vx[2]);
+    HVX_Vector sum_sf_3 = hvx_vec_reduce_sum_f32(vx[3]);
 
     // Now we need to store them as fp16
     HVX_Vector sum0_qf = Q6_Vqf32_vsub_VsfVsf(sum_sf_0, zero);
@@ -3264,6 +3266,7 @@ static int htp_mminit_vec_dot(struct htp_matmul_context * mmctx, enum htp_data_t
             mmctx->vec_dot_1x1 = vec_dot_q4_1x4x2_q8_1x4x2_1x1;
             mmctx->vec_dot_2x1 = vec_dot_q4_1x4x2_q8_1x4x2_2x1;
             mmctx->vec_dot_2x2 = vec_dot_q4_1x4x2_q8_1x4x2_2x2;
+            mmctx->quantize_row_f32 = quantize_row_f32_q8_1x4x2;
             return 0;
         case HTP_TYPE_Q8_0:
             mmctx->type        = "q8x4x2-f32";
