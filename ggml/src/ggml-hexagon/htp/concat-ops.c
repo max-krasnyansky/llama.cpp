@@ -114,23 +114,23 @@ static void concat_thread(unsigned int nth, unsigned int ith, void *data) {
                 hvx_copy_uu((uint8_t*)y, (const uint8_t*)x, ne0, type_size);
             }
         } else {
-            // non-contiguous dimension 0, fall back to 2D DMA copy
+            // non-contiguous dimension 0, fall back to DDR-to-DDR 2D DMA copy
             dma_queue * dma_queue = octx->ctx->dma[ith];
-            uint8_t * dst_spad = octx->dst_spad.data + (ith * octx->dst_spad.size_per_thread);
+            char * y = (char *)dst->data + i1*nb1 + i2*nb2 + i3*nb3;
 
             if (dim == 0) {
-                // Fetch ne00 elements from src0
+                // Fetch ne00 elements from src0 directly to dst
                 const char * x0 = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
-                dma_queue_push(dma_queue, dma_make_ptr(dst_spad, x0), type_size, nb00, type_size, ne00);
+                dma_queue_push(dma_queue, dma_make_ptr(y, x0), nb0, nb00, type_size, ne00);
 
-                // Fetch ne10 elements from src1 into the offset spad
+                // Fetch ne10 elements from src1 directly to offset dst
                 const char * x1 = (const char *)src1->data + i1*nb11 + i2*nb12 + i3*nb13;
-                dma_queue_push(dma_queue, dma_make_ptr(dst_spad + ne00 * type_size, x1), type_size, nb10, type_size, src1->ne[0]);
+                dma_queue_push(dma_queue, dma_make_ptr(y + ne00 * nb0, x1), nb0, nb10, type_size, src1->ne[0]);
 
                 dma_queue_pop(dma_queue);
                 dma_queue_pop(dma_queue);
             } else {
-                // Fetch from src0 or src1
+                // Fetch from src0 or src1 directly to dst
                 const char * x;
                 uint32_t src_stride;
                 if (i1 < ne01 && i2 < ne02 && i3 < ne03) {
@@ -140,13 +140,9 @@ static void concat_thread(unsigned int nth, unsigned int ith, void *data) {
                     x = (const char *)src1->data + (i1 - o[1])*nb11 + (i2 - o[2])*nb12 + (i3 - o[3])*nb13;
                     src_stride = nb10;
                 }
-                dma_queue_push(dma_queue, dma_make_ptr(dst_spad, x), type_size, src_stride, type_size, ne0);
+                dma_queue_push(dma_queue, dma_make_ptr(y, x), nb0, src_stride, type_size, ne0);
                 dma_queue_pop(dma_queue);
             }
-
-            char * y = (char *)dst->data + i1*nb1 + i2*nb2 + i3*nb3;
-            dma_queue_push(dma_queue, dma_make_ptr(y, dst_spad), nb0, type_size, type_size, ne0);
-            dma_queue_pop(dma_queue);
         }
     }
 
@@ -183,23 +179,6 @@ int op_concat(struct htp_ops_context * octx) {
 
     const uint32_t total_rows = ne3 * ne2 * ne1;
     const uint32_t n_threads = MIN(total_rows, octx->n_threads);
-
-    const bool is_contiguous_0 = (nb00 == type_size || ne00 == 1) &&
-                                 (nb10 == type_size || ne10 == 1) &&
-                                 (nb0  == type_size || ne0  == 1);
-
-    if (!is_contiguous_0) {
-        octx->dst_spad.size_per_thread = hex_round_up(ne0 * type_size, 128);
-        octx->dst_spad.size = octx->dst_spad.size_per_thread * n_threads;
-
-        if (octx->ctx->vtcm_size < octx->dst_spad.size) {
-            FARF(ERROR, "concat: current VTCM reservation %zu is too small, needed %zu\n", octx->ctx->vtcm_size, octx->dst_spad.size);
-            return HTP_STATUS_VTCM_TOO_SMALL;
-        }
-
-        octx->dst_spad.data = octx->ctx->vtcm_base;
-        octx->dst_spad.src = NULL;
-    }
 
     struct htp_concat_context cctx;
     cctx.octx = octx;
