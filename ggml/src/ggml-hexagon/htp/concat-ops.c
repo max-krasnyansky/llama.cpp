@@ -46,6 +46,11 @@ struct htp_concat_context {
     const uint32_t nb02 = src0->nb[2];               \
     const uint32_t nb03 = src0->nb[3];               \
                                                      \
+    const uint32_t ne10 = src1->ne[0];               \
+    const uint32_t ne11 = src1->ne[1];               \
+    const uint32_t ne12 = src1->ne[2];               \
+    const uint32_t ne13 = src1->ne[3];               \
+                                                     \
     const uint32_t nb10 = src1->nb[0];               \
     const uint32_t nb11 = src1->nb[1];               \
     const uint32_t nb12 = src1->nb[2];               \
