@@ -62,6 +62,8 @@ static inline size_t get_x4x2_row_stride(int weight_type, int k) {
         case HTP_TYPE_Q4_0:
         case HTP_TYPE_IQ4_NL:
             return (size_t) nb * (QK_Q4_0x4x2 / 2 + HMX_X4X2_DBLK_SIZE);         // 144 * nb
+        case HTP_TYPE_Q4_1:
+            return (size_t) nb * (QK_Q4_1x4x2 / 2 + HMX_X4X2_DBLK_SIZE + HMX_X4X2_DBLK_SIZE); // 160 * nb
         case HTP_TYPE_Q8_0:
             return (size_t) nb * (QK_Q8_0x4x2 + HMX_X4X2_DBLK_SIZE);             // 272 * nb
         case HTP_TYPE_MXFP4:
@@ -331,7 +333,7 @@ static void dequantize_x4x2_weight_to_fp16_tiles_task(
         int start_tile, int end_tile) {
 
     const int n_k_tiles = (unsigned)k_block / HMX_FP16_TILE_N_COLS;
-    const bool is_q4 = (weight_type == HTP_TYPE_Q4_0 || weight_type == HTP_TYPE_IQ4_NL);
+    const bool is_q4 = (weight_type == HTP_TYPE_Q4_0 || weight_type == HTP_TYPE_Q4_1 || weight_type == HTP_TYPE_IQ4_NL);
     const int qrow_size = is_q4 ? ((unsigned)k_block / 2) : k_block;
 
     const HVX_Vector vlut_cvt = (weight_type == HTP_TYPE_IQ4_NL) ? hvx_vmem(iq4_nl_to_fp16_lut) :
@@ -351,7 +353,7 @@ static void dequantize_x4x2_weight_to_fp16_tiles_task(
         if (kt >= n_k_tiles) { kt = 0; ct++; }
 
         // --- Batch-4 fast path for Q4: process 4 contiguous K-tiles with one vlut16 per row ---
-        if (is_q4 && (kt % 4 == 0) && (t + 4 <= end_tile) && ((t + 3) / n_k_tiles == ct)) {
+        if (is_q4 && weight_type != HTP_TYPE_Q4_1 && (kt % 4 == 0) && (t + 4 <= end_tile) && ((t + 3) / n_k_tiles == ct)) {
             unsigned blk_idx      = (kt * 32) / QK_Q4_0x4x2;
             unsigned sub_blk_base = ((kt * 32) % QK_Q4_0x4x2) / 32;  // 0 or 4
             bool upper            = (sub_blk_base >= 4);
@@ -441,7 +443,42 @@ static void dequantize_x4x2_weight_to_fp16_tiles_task(
         // --- Single-tile fallback ---
         __fp16 *tile_base = vtcm_dst + t * HMX_FP16_TILE_N_ELMS;
 
-        if (is_q4) {
+        if (weight_type == HTP_TYPE_Q4_1) {
+            unsigned blk_idx   = (kt * 32) / QK_Q4_1x4x2;
+            unsigned sub_blk   = ((kt * 32) % QK_Q4_1x4x2) / 32;
+            bool upper         = (sub_blk >= 4);
+            unsigned byte_off  = blk_idx * (QK_Q4_1x4x2 / 2) + (upper ? (sub_blk - 4) : sub_blk) * 32;
+            unsigned scale_off = qrow_size + blk_idx * HMX_X4X2_DBLK_SIZE + sub_blk * (int)sizeof(__fp16);
+            unsigned min_off   = qrow_size + (k_block / QK_Q4_1x4x2) * HMX_X4X2_DBLK_SIZE + blk_idx * HMX_X4X2_DBLK_SIZE + sub_blk * (int)sizeof(__fp16);
+
+            HVX_Vector v_off = v_scat_base;
+            unsigned row_offset = ct * HMX_FP16_TILE_N_COLS * row_stride;
+            unsigned row1 = ct * HMX_FP16_TILE_N_COLS + 1;
+            for (int r = 0; r < HMX_FP16_TILE_N_ROWS; r += 2, row1 += 2) {
+                const uint8_t *r0 = vtcm_src + row_offset; row_offset += row_stride;
+                const uint8_t *r1 = vtcm_src + row_offset; row_offset += row_stride;
+
+                HVX_Vector v0 = dequantize_x4x2_q4_0_group_hvx(
+                    r0 + byte_off, upper, (const __fp16 *)(r0 + scale_off), vlut_cvt);
+                HVX_Vector m0 = Q6_Vh_vsplat_R(*(const uint32_t *)(r0 + min_off));
+                v0 = Q6_Vhf_vadd_VhfVhf(v0, m0);
+
+                HVX_Vector v1;
+                if (row1 < n_cols) {
+                    v1 = dequantize_x4x2_q4_0_group_hvx(
+                        r1 + byte_off, upper, (const __fp16 *)(r1 + scale_off), vlut_cvt);
+                    HVX_Vector m1 = Q6_Vh_vsplat_R(*(const uint32_t *)(r1 + min_off));
+                    v1 = Q6_Vhf_vadd_VhfVhf(v1, m1);
+                } else {
+                    v1 = Q6_V_vzero();
+                }
+
+                HVX_Vector v_interleaved = Q6_V_vshuff_VVR(v1, v0, 2);
+                q6op_vscatter_A(vtcm_dst, v_off, v_interleaved, q_mask64);
+                v_off = Q6_Vw_vadd_VwVw(v_off, v_scat_step);
+            }
+            kt++; t++;
+        } else if (is_q4) {
             unsigned blk_idx   = (kt * 32) / QK_Q4_0x4x2;
             unsigned sub_blk   = ((kt * 32) % QK_Q4_0x4x2) / 32;
             bool upper         = (sub_blk >= 4);
