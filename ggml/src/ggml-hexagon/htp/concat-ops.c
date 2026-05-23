@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "hex-dma.h"
+#include "hex-fastdiv.h"
 #include "hvx-utils.h"
 
 #define GGML_COMMON_DECL_C
@@ -25,6 +26,9 @@ struct htp_concat_context {
 
     uint32_t nr;
     uint32_t dr; // rows per thread
+
+    struct fastdiv_values div_ne1;
+    struct fastdiv_values div_ne2;
 };
 
 #define concat_preamble                              \
@@ -98,12 +102,10 @@ static void concat_thread(unsigned int nth, unsigned int ith, void *data) {
                                  (nb0  == type_size || ne0  == 1);
 
     for (uint32_t r = row_start; r < row_end; ++r) {
-        uint32_t rem = r;
-        const uint32_t i1 = rem % ne1;
-        rem /= ne1;
-        const uint32_t i2 = rem % ne2;
-        rem /= ne2;
-        const uint32_t i3 = rem % ne3;
+        const uint32_t i1 = fastmodulo(r, ne1, &cctx->div_ne1);
+        uint32_t rem = fastdiv(r, &cctx->div_ne1);
+        const uint32_t i2 = fastmodulo(rem, ne2, &cctx->div_ne2);
+        const uint32_t i3 = fastdiv(rem, &cctx->div_ne2);
 
         if (is_contiguous_0) {
             if (dim == 0) {
@@ -185,6 +187,8 @@ int op_concat(struct htp_ops_context * octx) {
     cctx.type_size = type_size;
     cctx.nr = total_rows;
     cctx.dr = (total_rows + n_threads - 1) / n_threads;
+    cctx.div_ne1 = init_fastdiv_values(ne1);
+    cctx.div_ne2 = init_fastdiv_values(ne2);
 
     worker_pool_run_func(octx->ctx->worker_pool, concat_thread, &cctx, n_threads);
 
