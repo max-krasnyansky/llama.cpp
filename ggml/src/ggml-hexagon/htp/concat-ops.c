@@ -69,6 +69,45 @@ struct htp_concat_context {
     const uint32_t nb3 = dst->nb[3];
 
 
+static void concat_thread_dim0_fast_src0(unsigned int nth, unsigned int ith, void *data) {
+    struct htp_concat_context * cctx = (struct htp_concat_context *)data;
+    struct htp_ops_context * octx = cctx->octx;
+
+    concat_preamble;
+
+    const size_t type_size = cctx->type_size;
+
+    uint64_t qt = HAP_perf_get_qtimer_count();
+
+    const uint32_t ir0 = cctx->dr * ith;
+    const uint32_t ir1 = MIN(ir0 + cctx->dr, cctx->nr);
+
+    for (uint32_t r = ir0; r < ir1; ++r) {
+        const uint32_t i1 = fastmodulo(r, ne1, &cctx->div_ne1);
+        uint32_t rem = fastdiv(r, &cctx->div_ne1);
+        const uint32_t i2 = fastmodulo(rem, ne2, &cctx->div_ne2);
+        const uint32_t i3 = fastdiv(rem, &cctx->div_ne2);
+
+        char * y1 = (char *)dst->data + i1*nb1 + i2*nb2 + i3*nb3 + ne00 * nb0;
+
+        if (nb10 == type_size && nb0 == type_size) {
+            const char * x1 = (const char *)src1->data + i1*nb11 + i2*nb12 + i3*nb13;
+            hvx_copy_uu((uint8_t*)y1, (const uint8_t*)x1, src1->ne[0], type_size);
+        } else {
+            for (uint32_t i0 = 0; i0 < src1->ne[0]; i0++) {
+                const char * x = (const char *)src1->data + i0*nb10 + i1*nb11 + i2*nb12 + i3*nb13;
+                char * y = y1 + i0*nb0;
+                memcpy(y, x, type_size);
+            }
+        }
+    }
+
+    qt = HAP_perf_qtimer_count_to_us(HAP_perf_get_qtimer_count() - qt);
+    FARF(HIGH, "concat-fast-src0 %d/%d: dim 0 x %ux%ux%ux%u / %ux%ux%ux%u -> %ux%ux%ux%u usec %u\n", ith, nth,
+         ne00, ne01, ne02, ne03, src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3], ne0, ne1, ne2, ne3, (unsigned) qt);
+}
+
+
 static void concat_thread(unsigned int nth, unsigned int ith, void *data) {
     struct htp_concat_context * cctx = (struct htp_concat_context *)data;
     struct htp_ops_context * octx = cctx->octx;
@@ -86,10 +125,6 @@ static void concat_thread(unsigned int nth, unsigned int ith, void *data) {
     uint64_t o[4] = {0, 0, 0, 0};
     o[dim] = src0->ne[dim];
 
-    const bool is_contiguous_0 = (nb00 == type_size || ne00 == 1) &&
-                                 (nb10 == type_size || ne10 == 1) &&
-                                 (nb0  == type_size || ne0  == 1);
-
     for (uint32_t r = ir0; r < ir1; ++r) {
         const uint32_t i1 = fastmodulo(r, ne1, &cctx->div_ne1);
         uint32_t rem = fastdiv(r, &cctx->div_ne1);
@@ -100,16 +135,14 @@ static void concat_thread(unsigned int nth, unsigned int ith, void *data) {
             char * y0 = (char *)dst->data + i1*nb1 + i2*nb2 + i3*nb3;
             char * y1 = y0 + ne00 * nb0;
 
-            if (!cctx->fast_src0) {
-                if (nb00 == type_size && nb0 == type_size) {
-                    const char * x0 = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
-                    hvx_copy_uu((uint8_t*)y0, (const uint8_t*)x0, ne00, type_size);
-                } else {
-                    for (uint32_t i0 = 0; i0 < ne00; i0++) {
-                        const char * x = (const char *)src0->data + i0*nb00 + i1*nb01 + i2*nb02 + i3*nb03;
-                        char * y = y0 + i0*nb0;
-                        memcpy(y, x, type_size);
-                    }
+            if (nb00 == type_size && nb0 == type_size) {
+                const char * x0 = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
+                hvx_copy_uu((uint8_t*)y0, (const uint8_t*)x0, ne00, type_size);
+            } else {
+                for (uint32_t i0 = 0; i0 < ne00; i0++) {
+                    const char * x = (const char *)src0->data + i0*nb00 + i1*nb01 + i2*nb02 + i3*nb03;
+                    char * y = y0 + i0*nb0;
+                    memcpy(y, x, type_size);
                 }
             }
 
@@ -210,7 +243,11 @@ int op_concat(struct htp_ops_context * octx) {
     cctx.div_ne2 = init_fastdiv_values(ne2);
     cctx.fast_src0 = fast_src0;
 
-    worker_pool_run_func(octx->ctx->worker_pool, concat_thread, &cctx, n_threads);
+    if (fast_src0) {
+        worker_pool_run_func(octx->ctx->worker_pool, concat_thread_dim0_fast_src0, &cctx, n_threads);
+    } else {
+        worker_pool_run_func(octx->ctx->worker_pool, concat_thread, &cctx, n_threads);
+    }
 
     return HTP_STATUS_OK;
 }
