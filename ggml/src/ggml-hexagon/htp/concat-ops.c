@@ -29,6 +29,8 @@ struct htp_concat_context {
 
     struct fastdiv_values div_ne1;
     struct fastdiv_values div_ne2;
+
+    bool fast_src0;
 };
 
 #define concat_preamble                              \
@@ -94,71 +96,58 @@ static void concat_thread(unsigned int nth, unsigned int ith, void *data) {
         const uint32_t i2 = fastmodulo(rem, ne2, &cctx->div_ne2);
         const uint32_t i3 = fastdiv(rem, &cctx->div_ne2);
 
-        if (is_contiguous_0) {
-            if (dim == 0) {
-                // copy row from src0, then row from src1
-                char * y0 = (char *)dst->data + i1*nb1 + i2*nb2 + i3*nb3;
-                char * y1 = y0 + ne00 * type_size;
+        if (dim == 0) {
+            char * y0 = (char *)dst->data + i1*nb1 + i2*nb2 + i3*nb3;
+            char * y1 = y0 + ne00 * nb0;
 
-                const char * x0 = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
+            if (!cctx->fast_src0) {
+                if (nb00 == type_size && nb0 == type_size) {
+                    const char * x0 = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
+                    hvx_copy_uu((uint8_t*)y0, (const uint8_t*)x0, ne00, type_size);
+                } else {
+                    for (uint32_t i0 = 0; i0 < ne00; i0++) {
+                        const char * x = (const char *)src0->data + i0*nb00 + i1*nb01 + i2*nb02 + i3*nb03;
+                        char * y = y0 + i0*nb0;
+                        memcpy(y, x, type_size);
+                    }
+                }
+            }
+
+            if (nb10 == type_size && nb0 == type_size) {
                 const char * x1 = (const char *)src1->data + i1*nb11 + i2*nb12 + i3*nb13;
-
-                hvx_copy_uu((uint8_t*)y0, (const uint8_t*)x0, ne00, type_size);
                 hvx_copy_uu((uint8_t*)y1, (const uint8_t*)x1, src1->ne[0], type_size);
             } else {
-                // dim != 0
-                // The row is either entirely from src0 or entirely from src1
-                const char * x;
-                if (i1 < ne01 && i2 < ne02 && i3 < ne03) {
-                    x = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
-                } else {
-                    x = (const char *)src1->data + (i1 - o[1])*nb11 + (i2 - o[2])*nb12 + (i3 - o[3])*nb13;
+                for (uint32_t i0 = 0; i0 < src1->ne[0]; i0++) {
+                    const char * x = (const char *)src1->data + i0*nb10 + i1*nb11 + i2*nb12 + i3*nb13;
+                    char * y = y1 + i0*nb0;
+                    memcpy(y, x, type_size);
                 }
-                char * y = (char *)dst->data + i1*nb1 + i2*nb2 + i3*nb3;
-
-                hvx_copy_uu((uint8_t*)y, (const uint8_t*)x, ne0, type_size);
             }
         } else {
-            // non-contiguous dimension 0, fall back to DDR-to-DDR 2D DMA copy
-            dma_queue * dma_queue = octx->ctx->dma[ith];
+            // dim != 0
+            const char * x_base;
+            uint32_t ne0_val;
+            uint32_t nb0_val;
+
+            if (i1 < ne01 && i2 < ne02 && i3 < ne03) {
+                x_base = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
+                ne0_val = ne00;
+                nb0_val = nb00;
+            } else {
+                x_base = (const char *)src1->data + (i1 - o[1])*nb11 + (i2 - o[2])*nb12 + (i3 - o[3])*nb13;
+                ne0_val = src1->ne[0];
+                nb0_val = nb10;
+            }
             char * y = (char *)dst->data + i1*nb1 + i2*nb2 + i3*nb3;
 
-            if (dim == 0) {
-                // Fetch ne00 elements from src0 directly to dst
-                const char * x0 = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
-                size_t row_size0 = (nb00 == type_size && nb0 == type_size) ? ne00 * type_size : type_size;
-                size_t nrows0    = (nb00 == type_size && nb0 == type_size) ? 1 : ne00;
-                size_t sstr0     = (nb00 == type_size && nb0 == type_size) ? 0 : nb00;
-                size_t dstr0     = (nb00 == type_size && nb0 == type_size) ? 0 : nb0;
-                dma_queue_push(dma_queue, dma_make_ptr(y, x0), dstr0, sstr0, row_size0, nrows0);
-
-                // Fetch ne10 elements from src1 directly to offset dst
-                const char * x1 = (const char *)src1->data + i1*nb11 + i2*nb12 + i3*nb13;
-                size_t row_size1 = (nb10 == type_size && nb0 == type_size) ? src1->ne[0] * type_size : type_size;
-                size_t nrows1    = (nb10 == type_size && nb0 == type_size) ? 1 : src1->ne[0];
-                size_t sstr1     = (nb10 == type_size && nb0 == type_size) ? 0 : nb10;
-                size_t dstr1     = (nb10 == type_size && nb0 == type_size) ? 0 : nb0;
-                dma_queue_push(dma_queue, dma_make_ptr(y + ne00 * nb0, x1), dstr1, sstr1, row_size1, nrows1);
-
-                dma_queue_pop(dma_queue);
-                dma_queue_pop(dma_queue);
+            if (nb0_val == type_size && nb0 == type_size) {
+                hvx_copy_uu((uint8_t*)y, (const uint8_t*)x_base, ne0_val, type_size);
             } else {
-                // Fetch from src0 or src1 directly to dst
-                const char * x;
-                uint32_t src_stride;
-                if (i1 < ne01 && i2 < ne02 && i3 < ne03) {
-                    x = (const char *)src0->data + i1*nb01 + i2*nb02 + i3*nb03;
-                    src_stride = nb00;
-                } else {
-                    x = (const char *)src1->data + (i1 - o[1])*nb11 + (i2 - o[2])*nb12 + (i3 - o[3])*nb13;
-                    src_stride = nb10;
+                for (uint32_t i0 = 0; i0 < ne0_val; i0++) {
+                    const char * x = x_base + i0*nb0_val;
+                    char * y_elem = y + i0*nb0;
+                    memcpy(y_elem, x, type_size);
                 }
-                size_t row_size = (src_stride == type_size && nb0 == type_size) ? ne0 * type_size : type_size;
-                size_t nrows    = (src_stride == type_size && nb0 == type_size) ? 1 : ne0;
-                size_t sstr     = (src_stride == type_size && nb0 == type_size) ? 0 : src_stride;
-                size_t dstr     = (src_stride == type_size && nb0 == type_size) ? 0 : nb0;
-                dma_queue_push(dma_queue, dma_make_ptr(y, x), dstr, sstr, row_size, nrows);
-                dma_queue_pop(dma_queue);
             }
         }
     }
@@ -197,6 +186,20 @@ int op_concat(struct htp_ops_context * octx) {
     const uint32_t total_rows = ne3 * ne2 * ne1;
     const uint32_t n_threads = MIN(total_rows, octx->n_threads);
 
+    const bool fast_src0 = (dim == 0 && nb00 == type_size && nb0 == type_size && src0->ne[1] == dst->ne[1] && src0->ne[2] == dst->ne[2] && src0->ne[3] == dst->ne[3]);
+
+    if (fast_src0) {
+        // Fast path for src0: single DMA push for the entire tensor across rows
+        dma_queue * dma_queue = octx->ctx->dma[0];
+
+        // Calculate the contiguous chunk size per row
+        size_t row_size = ne00 * type_size;
+
+        // Use the DMA engine to copy all rows at once, using the correct src and dst strides
+        dma_queue_push(dma_queue, dma_make_ptr((void*)dst->data, src0->data), nb1, nb01, row_size, total_rows);
+        dma_queue_pop(dma_queue);
+    }
+
     struct htp_concat_context cctx;
     cctx.octx = octx;
     cctx.dim = dim;
@@ -205,6 +208,7 @@ int op_concat(struct htp_ops_context * octx) {
     cctx.dr = (total_rows + n_threads - 1) / n_threads;
     cctx.div_ne1 = init_fastdiv_values(ne1);
     cctx.div_ne2 = init_fastdiv_values(ne2);
+    cctx.fast_src0 = fast_src0;
 
     worker_pool_run_func(octx->ctx->worker_pool, concat_thread, &cctx, n_threads);
 
