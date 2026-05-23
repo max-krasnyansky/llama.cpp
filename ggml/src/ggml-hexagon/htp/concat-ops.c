@@ -79,29 +79,11 @@ static void concat_thread(unsigned int nth, unsigned int ith, void *data) {
     uint64_t o[4] = {0, 0, 0, 0};
     o[dim] = src0->ne[dim];
 
-    // we map flat row index to i1, i2, i3
-    // nr is either ne1*ne2*ne3, or ne2*ne3, or ne3 depending on dim...
-    // Let's do it like CPU does, iter over i3, i2, i1, i0
-    // Actually, we can parallelize by the outer dims and loop over inner dims
-
-    // To keep it simple and handle different dims, we just distribute
-    // the total number of loops for the outer dimensions among threads.
-
-    // Let's determine total elements to copy to parallelize.
-    // It's much easier to just do loops based on standard dims, and thread by i2 like in cpu
-    // or by a flat outer index.
-
-    // Calculate total rows for iterating
-    const uint32_t total_rows = ne3 * ne2 * ne1;
-    const uint32_t rows_per_th = (total_rows + nth - 1) / nth;
-    const uint32_t row_start = ith * rows_per_th;
-    const uint32_t row_end = MIN(row_start + rows_per_th, total_rows);
-
     const bool is_contiguous_0 = (nb00 == type_size || ne00 == 1) &&
                                  (nb10 == type_size || ne10 == 1) &&
                                  (nb0  == type_size || ne0  == 1);
 
-    for (uint32_t r = row_start; r < row_end; ++r) {
+    for (uint32_t r = ir0; r < ir1; ++r) {
         const uint32_t i1 = fastmodulo(r, ne1, &cctx->div_ne1);
         uint32_t rem = fastdiv(r, &cctx->div_ne1);
         const uint32_t i2 = fastmodulo(rem, ne2, &cctx->div_ne2);
