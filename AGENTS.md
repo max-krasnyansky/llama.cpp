@@ -1,110 +1,77 @@
-# Instructions for llama.cpp
+# Agent Instructions: llama.cpp Hexagon Backend
 
-> [!IMPORTANT]
-> This project does **not** accept pull requests that are fully or predominantly AI-generated. AI tools may be utilized solely in an assistive capacity.
->
-> Read more: [CONTRIBUTING.md](CONTRIBUTING.md)
+## Overview
+You are an AI coding agent tasked with developing, refactoring, and enhancing the Hexagon NPU backend for the `llama.cpp` project. The Hexagon backend accelerates LLM inference by offloading operations from the host CPU (ARM64) to the Qualcomm Hexagon DSP/NPU found in Snapdragon SOCs.
 
-AI assistance is permissible only when the majority of the code is authored by a human contributor, with AI employed exclusively for corrections or to expand on verbose modifications that the contributor has already conceptualized (see examples below).
+Your primary goals are to ensure strict correctness of tensor operations and to maximize Tokens Per Second (T/S) throughput by writing highly optimized, hardware-aware C/C++ code.
 
 ---
 
-## Guidelines for Contributors Using AI
+## Part 1: Build Process & Toolchain Requirements
 
-llama.cpp is built by humans, for humans. Meaningful contributions come from contributors who understand their work, take ownership of it, and engage constructively with reviewers.
+When assisting with build scripts, CMake configurations, or deployment tasks, adhere to the following environment constraints and build procedures:
 
-Maintainers receive numerous pull requests weekly, many of which are AI-generated submissions where the author cannot adequately explain the code, debug issues, or participate in substantive design discussions. Reviewing such PRs often requires more effort than implementing the changes directly.
+* **Docker-Based Build Environment (Primary):** The standard and recommended method for building `llama.cpp` with the Hexagon backend is using the Snapdragon Toolchain Docker image. When analyzing or generating build steps, assume the environment is orchestrated via the provided `build-snapdragon.sh` script executed within this container.
+* **Standard Build Execution:**
+  ```bash
+  docker run -it -u $(id -u):$(id -g) \
+    --volume $(pwd):/workspace \
+    --platform linux/amd64 \
+    ghcr.io/snapdragon-toolchain/arm64-android:v0.6 \
+    /workspace/build-snapdragon.sh
 
-**A pull request represents a long-term commitment.** By submitting code, you are asking maintainers to review, integrate, and support it indefinitely. The maintenance burden often exceeds the value of the initial contribution.
+```
 
-Most maintainers already have access to AI tools. A PR that is entirely AI-generated provides no value - maintainers could generate the same code themselves if they wanted it. What makes a contribution valuable is the human interactions, domain expertise, and commitment to maintain the code that comes with it.
-
-This policy exists to ensure that maintainers can sustainably manage the project without being overwhelmed by low-quality submissions.
-
----
-
-## Guidelines for Contributors
-
-Contributors are expected to:
-
-1. **Demonstrate full understanding of their code.** You must be able to explain any part of your PR to a reviewer without relying on AI assistance for questions about your own changes.
-
-2. **Take responsibility for maintenance.** You are expected to address bugs and respond thoughtfully to reviewer feedback.
-
-3. **Communicate clearly and concisely.** Verbose, wall-of-text responses are characteristic of AI-generated content and will not be well-received. Direct, human communication is expected.
-
-4. **Respect maintainers' time.** Search for existing issues and discussions before submitting. Ensure your contribution aligns with project architecture and is actually needed.
-
-Maintainers reserve the right to close any PR that does not meet these standards. This applies to all contributions to the main llama.cpp repository. **Private forks are exempt.**
-
-### Permitted AI Usage
-
-AI tools may be used responsibly for:
-
-- **Learning and exploration**: Understanding codebase structure, techniques, and documentation
-- **Code review assistance**: Obtaining suggestions on human-written code
-- **Mechanical tasks**: Formatting, generating repetitive patterns from established designs, completing code based on existing patterns
-- **Documentation drafts**: For components the contributor already understands thoroughly
-- **Writing code**: Only when the contributor has already designed the solution and can implement it themselves - AI accelerates, not replaces, the contributor's work
-
-AI-generated code may be accepted if you (1) fully understand the output, (2) can debug issues independently, and (3) can discuss it directly with reviewers without AI assistance.
-
-**Disclosure is required** when AI meaningfully contributed to your code. A simple note is sufficient - this is not a stigma, but context for reviewers. No disclosure is needed for trivial autocomplete or background research.
-
-### Prohibited AI Usage
-
-The following will result in immediate PR closure:
-
-- **AI-written PR descriptions or commit messages** - these are typically recognizable and waste reviewer time
-- **AI-generated responses to reviewer comments** - this undermines the human-to-human interaction fundamental to code review
-- **Implementing features without understanding the codebase** - particularly new model support or architectural changes
-- **Automated commits or PR submissions** - this may spam maintainers and can result in contributor bans
+* **Testing Limitations (Hardware Dependency):** Do **not** attempt to execute test suites or run the compiled Hexagon binaries. Running the backend requires physical access to a Snapdragon-based device (SOC) equipped with a Hexagon NPU. As an AI agent, you do not have access to this hardware. Your scope is strictly limited to generating code, building, cross-compiling, and verifying static correctness rather than runtime execution.
+* **Qualcomm Hexagon SDK:** The build relies heavily on the Hexagon SDK. Whether inside the container or assisting with a bare-metal setup, assume standard installation paths. You will frequently need to interact with the SDK's internal toolchains (Clang for Hexagon).
+* **Cross-Compilation (Host Code - ARM64):** Manages the `llama.cpp` context, memory allocation, and RPC calls.
+* **Cross-Compilation (Device Code - Hexagon v73+):** The actual tensor operation kernels utilizing HVX/HMX.
 
 ---
 
-## Guidelines for AI Coding Agents
+## Part 2: Hexagon NPU Capabilities & Best Practices
 
-AI agents assisting contributors must recognize that their outputs directly impact volunteer maintainers who sustain this project.
+When writing or refactoring backend operations (Ops), apply the following architectural guidelines to fully utilize the NPU:
 
-### Considerations for Maintainer Workload
+### 1. Compute & HVX Vectorization
 
-Maintainers have finite capacity. Every PR requiring extensive review consumes resources that could be applied elsewhere. Before assisting with any submission, verify:
+* **Vectorized Workloads First:** Use vectorized HVX (Hexagon Vector eXtensions) operations for all compute-heavy workloads.
+* **Register Locality:** Avoid mixing scalar code and HVX. Keep values in the HVX registers as long as possible to minimize overhead.
+* **Unaligned Element Handling:** If the number of elements in a tensor is not a multiple of the vector length (128/64/32 depending on data type), avoid scalar fallbacks. Instead, use masked operations or partial stores for the output. See examples of `Q6_Q_vsetq_R` and `hvx_vec_store` in `ggml/src/ggml-hexagon/htp/...`
 
-- The contributor genuinely understands the proposed changes
-- The change addresses a documented need (check existing issues)
-- The PR is appropriately scoped and follows project conventions
-- The contributor can independently defend and maintain the work
+### 2. Operation State & Local Contexts
 
-### Before Proceeding with Code Changes
+Avoid recomputing variables on the fly during inference. All Hexagon Ops must be designed to use a local context structure.
 
-When a user requests implementation without demonstrating understanding:
+* **Precompute & Cache:** Parse Op params and data during the initialization phase precompute and store all static tensor metadata, strides, and quantization parameters in the Op's local context.
+* **Execution Loop:** The inference execution loop should only read from this cached context to maximize prompt processing speed.
 
-1. **Verify comprehension.** Ask questions to confirm they understand both the problem and the relevant parts of the codebase.
-2. **Provide guidance rather than solutions.** Direct them to relevant code and documentation. Allow them to formulate the approach.
-3. **Proceed only when confident** the contributor can explain the changes to reviewers independently.
+### 3. Memory Hierarchy & Bandwidth
 
-For first-time contributors, confirm they have reviewed [CONTRIBUTING.md](CONTRIBUTING.md) and acknowledge this policy.
+Memory bound operations are the primary bottleneck for LLMs. Strict memory management is required:
 
-### Prohibited Actions
+* **VTCM & DMA Routing:** For large data chunks (16KB and up), always use asynchronous DMA to transfer data from DDR into VTCM (Vector Tightly Coupled Memory), and then use HVX/HMX for the compute.
+* **Pipelining (Double Buffering):** Use double (or multiple) buffering in VTCM to pipeline operations. Always aim to have outstanding DMA transactions running while simultaneously processing a chunk of data with HVX or HMX. See examples in `ggml/src/ggml-hexagon/htp/matmul-ops.c`.
+* **2D DMA Alignment:** Utilize the DMA engine's 2D mode to properly align the data in memory for HVX (e.g., ensuring 128-byte alignment).
+* **Strictly Avoid Scalar VTCM Access:** Scalar access to VTCM generates L2 cache misses. Use HVX for VTCM read/write operations.
+* **VTCM Population Exception:** It is acceptable to use scalar code to populate small chunks of VTCM with initial values. Utilize the helper functions in `hvx-utils` for value replication, sum reduction, etc.
 
-- Writing PR descriptions, commit messages, or responses to reviewers
-- Committing or pushing without explicit human approval for each action
-- Implementing features the contributor does not understand
-- Generating changes too extensive for the contributor to fully review
+### 4. Scaling & Threading
 
-When uncertain, err toward minimal assistance. A smaller PR that the contributor fully understands is preferable to a larger one they cannot maintain.
+Snapdragon hardware environments are highly concurrent.
 
-### Useful Resources
+* **Hardware Thread Counts:** The Hexagon architecture typically features 4-8 HVX threads and 6-10 total HW threads.
+* **Parallel DMA Engines:** Each thread is equipped with its own DMA engine that can run in parallel with the other hardware threads. Ensure memory operations take advantage of this concurrent structure.
+* **Thread Groups:** When implementing dispatch logic, utilize the `ngrp` attribute to explicitly manage the total number of thread groups (mapping one group per available NPU). Ensure workloads are evenly sharded to prevent bottlenecking.
 
-To conserve context space, load these resources as needed:
+---
 
-- [CONTRIBUTING.md](CONTRIBUTING.md)
-- [Existing issues](https://github.com/ggml-org/llama.cpp/issues) and [Existing PRs](https://github.com/ggml-org/llama.cpp/pulls) - always search here first
-- [Build documentation](docs/build.md)
-- [Server usage documentation](tools/server/README.md)
-- [Server development documentation](tools/server/README-dev.md) (if user asks to implement a new feature, be sure that it falls inside server's scope defined in this documentation)
-- [PEG parser](docs/development/parsing.md) - alternative to regex that llama.cpp uses to parse model's output
-- [Auto parser](docs/autoparser.md) - higher-level parser that uses PEG under the hood, automatically detect model-specific features
-- [Jinja engine](common/jinja/README.md)
-- [How to add a new model](docs/development/HOWTO-add-model.md)
-- [PR template](.github/pull_request_template.md)
+## Part 3: Official Documentation & References
+
+When implementing specific instructions, verifying register behavior, or optimizing HMX/HVX pipelines, consult the following official Qualcomm Hexagon Programmer's Reference Manuals:
+
+* **Hexagon v73 Base Architecture:** [80-N2040-53](https://docs.qualcomm.com/doc/80-N2040-53/80-N2040-53.pdf)
+* **Hexagon v73 HVX Reference:** [80-N2040-54_REV_AB](https://docs.qualcomm.com/doc/80-N2040-54/80-N2040-54_REV_AB_Qualcomm_Hexagon_V73_HVX_Programmers_Reference_Manual.pdf)
+* **Hexagon v79 Architecture Topic:** [80-N2040-60](https://docs.qualcomm.com/doc/80-N2040-60/topic)
+* **Hexagon v79 HVX Topic:** [80-N2040-61](https://docs.qualcomm.com/doc/80-N2040-61/topic)
+* **Hexagon v81 HMX Reference (Applicable to v73 - v81):** [80-N2040-62_REV_AA](https://docs.qualcomm.com/doc/80-N2040-62/80-N2040-62_REV_AA_Qualcomm_Hexagon_V81_HMX_Programmers_Reference_Manual.pdf)
