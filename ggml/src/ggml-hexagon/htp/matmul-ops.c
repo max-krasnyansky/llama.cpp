@@ -700,6 +700,219 @@ static void vec_dot_q4x4x2_q8x4x2_2x2(const int n, float * restrict s0, float * 
     hvx_vec_store_u(s1, 8, r0_r1_c1_sum);  // row0,col1 row1,col1
 }
 
+
+static void vec_dot_q4_1x4x2_q8_1x4x2_1x1(const int n, float * restrict s0, const void * restrict vx0, const void * restrict vy0) {
+    assert(n % 32 == 0);  // min sub-block size
+    assert((unsigned long) vx0 % 128 == 0);
+    assert((unsigned long) vy0 % 128 == 0);
+
+    const uint32_t qk = QK_Q4_1x4x2 * 4;
+
+    const uint8_t * r0_x_q = vx0;
+    const uint8_t * y_q    = vy0;
+
+    const uint32_t x_qblk_size = 512;
+    const uint32_t y_qblk_size = 1024;
+    const uint32_t x_dblk_size = 128;   // 32 * 2 (d) + 32 * 2 (m)
+    const uint32_t y_dsblk_size = 128;  // 32 * 2 (d) + 32 * 2 (s)
+
+    const uint8_t * r0_x_dm = r0_x_q + n / 2;
+    const uint8_t * y_ds    = y_q    + n;
+
+    const int nb = (n + qk - 1) / qk;
+    const int nloe = (n % qk) * 4;
+
+    HVX_Vector r0_sum = Q6_V_vzero();
+
+    for (int i = 0; i < nb; i++) {
+        HVX_Vector_x8 r0_q = (i == nb - 1 && nloe) ? hvx_vec_load_q4x4x8_partial(r0_x_q + i * x_qblk_size, nloe) : hvx_vec_load_q4x4x8_full(r0_x_q + i * x_qblk_size);
+        HVX_Vector_x8 vy_q = (i == nb - 1 && nloe) ? hvx_vec_load_q8_1x4x8_partial(y_q + i * y_qblk_size, nloe) : hvx_vec_load_q8_1x4x8_full(y_q + i * y_qblk_size);
+
+        HVX_Vector r0_dm_hf01 = hvx_vmemu(r0_x_dm + i * x_dblk_size + 0);
+        HVX_Vector r0_dm_hf23 = hvx_vmemu(r0_x_dm + i * x_dblk_size + 64);
+        HVX_Vector y_ds_hf01 = hvx_vmemu(y_ds + i * y_dsblk_size + 0);
+        HVX_Vector y_ds_hf23 = hvx_vmemu(y_ds + i * y_dsblk_size + 64);
+
+        HVX_Vector r0_d_hf01, r0_m_hf01;
+        HVX_Vector r0_d_hf23, r0_m_hf23;
+        HVX_Vector y_d_hf01, y_s_hf01;
+        HVX_Vector y_d_hf23, y_s_hf23;
+
+        // dm layout: 32 bytes d, 32 bytes m for the first 64 bytes. So we can extract d and m
+        // Actually the layout is: 16 bytes d from 4 blocks, 16 bytes d from next 4. So 32 bytes d.
+        // Then 32 bytes m. So the first 32 bytes are d, the next 32 bytes are m.
+        // Let's adjust r0_d_hf and r0_m_hf.
+        // Wait, hvx_vmemu loads 128 bytes. We can load the whole dm block in one go!
+        HVX_Vector r0_dm = hvx_vmemu(r0_x_dm + i * x_dblk_size);
+        // r0_dm has 32 bytes d, 32 bytes m, 32 bytes d, 32 bytes m (because 128 bytes loaded)
+        // Wait, x_dblk_size is 128 bytes. The first 32 are d, next 32 m, next 32 d, next 32 m.
+        // Let's extract d and m
+        HVX_Vector r0_d_hf = Q6_V_vshuff_VVR(r0_dm, r0_dm, 32); // this will interleave but it's easier to just use alignment
+        // Actually, let's unpack d and m using vshuff or similar, or just cast
+
+        // Let's use scalar loop for the tail dot product sum of scales since it's only 16 elements per HVX_Vector_x8
+        // Actually, x_dblk_size is 128 bytes. 64 elements.
+
+        // Wait, we need to do q_dot = dot(r0_q, vy_q) -> 32 elements.
+        HVX_Vector r0y_qdot_0 = hvx_vec_rmpy_x4(r0_q.val[0], vy_q.val[0], r0_q.val[1], vy_q.val[1]);
+        HVX_Vector r0y_qdot_1 = hvx_vec_rmpy_x4(r0_q.val[2], vy_q.val[2], r0_q.val[3], vy_q.val[3]);
+        HVX_Vector r0y_qdot_2 = hvx_vec_rmpy_x4(r0_q.val[4], vy_q.val[4], r0_q.val[5], vy_q.val[5]);
+        HVX_Vector r0y_qdot_3 = hvx_vec_rmpy_x4(r0_q.val[6], vy_q.val[6], r0_q.val[7], vy_q.val[7]);
+
+        HVX_Vector r0y_qdot_01 = Q6_Vw_vadd_VwVw(r0y_qdot_0, r0y_qdot_1);
+        HVX_Vector r0y_qdot_23 = Q6_Vw_vadd_VwVw(r0y_qdot_2, r0y_qdot_3);
+
+        // Convert to f32
+        HVX_Vector r0y_qdot_01_f = Q6_Vsf_vcvt_Vw(r0y_qdot_01);
+        HVX_Vector r0y_qdot_23_f = Q6_Vsf_vcvt_Vw(r0y_qdot_23);
+
+        // Load d, m, ds, ss
+        // The scales are not necessarily 128-byte aligned, but they are consecutive.
+        // Since we are dealing with 32 elements in r0y_qdot (4 int32 per block, 8 blocks -> 32 int32s).
+        // Wait, each block is 32 elements. We have 8 blocks per 256. 256 * 4 = 1024 elements = 32 blocks.
+        // So 32 pairs of (d, m) and (d, s).
+        // 32 * 2 bytes = 64 bytes for d, 64 bytes for m.
+
+        const ggml_half * r0_d = (const ggml_half *)(r0_x_dm + i * x_dblk_size);
+        const ggml_half * y_d  = (const ggml_half *)(y_ds + i * y_dsblk_size);
+
+        // Since it's only 32 elements, we can do a quick loop or use HVX.
+        // Let's use HVX for the scales.
+        // We have 32 `r0y_qdot` elements. We need to compute: sum( r0y_qdot * (r0_d * y_d) + r0_m * y_s )
+        HVX_Vector r0_d_vec = hvx_vmemu((const uint8_t*)r0_d); // Loads 64 halfs (128 bytes)
+        HVX_Vector y_d_vec = hvx_vmemu((const uint8_t*)y_d); // Loads 64 halfs (128 bytes)
+
+        // Wait, the memory layout of d and m is:
+        // 16 bytes d, 16 bytes m, 16 bytes d, 16 bytes m ...
+        // Wait, repack_row_q4_1x4x2 stores 16 bytes (8 scales) for d, then 16 bytes for m.
+        // Each dblk is 32 bytes (16 d, 16 m). There are 4 dblks for 1024 elements (4 * 256).
+        // So memory layout is:
+        // [16b d] [16b m] [16b d] [16b m] [16b d] [16b m] [16b d] [16b m]
+        // This is 128 bytes total.
+
+        // Unpack d and m into separate vectors
+        // We need the first 8 halfs (16 bytes), skip 16 bytes, etc.
+        // We can just use vshuff or do it in two halves.
+        // Or scalar loop since it's 32 elements. But scalar is slow.
+
+        // Let's convert to fp32 directly using HVX.
+        // Actually, there's a trick.
+        HVX_Vector r0_dm_hf = r0_d_vec; // contains intermixed d and m
+        HVX_Vector y_ds_hf = y_d_vec;   // contains intermixed d and s
+
+        // We can use Q6_Ww_vcvt_VhfR to convert hf to f32. It takes 64 halfs and gives 64 floats (2 HVX vectors).
+        HVX_VectorPair r0_dm_f32 = Q6_Wsf_vcvt_VhfR(r0_dm_hf);
+        HVX_VectorPair y_ds_f32 = Q6_Wsf_vcvt_VhfR(y_ds_hf);
+
+        // Now we have 64 floats for r0 (32 d's, 32 m's) and 64 floats for y (32 d's, 32 s's).
+        // The layout in the 64 floats is: 8 d's, 8 m's, 8 d's, 8 m's, 8 d's, 8 m's, 8 d's, 8 m's.
+        // We can multiply d * d and m * s.
+        HVX_Vector r0_dm_y_ds_f32_0 = Q6_Vsf_vmpy_VsfVsf(Q6_V_lo_W(r0_dm_f32), Q6_V_lo_W(y_ds_f32));
+        HVX_Vector r0_dm_y_ds_f32_1 = Q6_Vsf_vmpy_VsfVsf(Q6_V_hi_W(r0_dm_f32), Q6_V_hi_W(y_ds_f32));
+
+        // Now r0_dm_y_ds_f32 contains (d*d) and (m*s) interleaved in blocks of 8 floats (32 bytes).
+        // We want to extract the (d*d) values and multiply them by r0y_qdot_f.
+        // Then we add the (m*s) values.
+
+        // We can use vshuff to separate them, or just use predicate to selectively multiply and add.
+        // Or we can just multiply r0y_qdot_01_f with 1.0 for the m*s positions? No.
+
+        // Let's separate (d*d) and (m*s).
+        // r0_dm_y_ds_f32_0 has 32 floats: 8 d*d, 8 m*s, 8 d*d, 8 m*s.
+        // r0_dm_y_ds_f32_1 has 32 floats: 8 d*d, 8 m*s, 8 d*d, 8 m*s.
+
+        HVX_Vector dd_0 = Q6_V_vshuff_VVR(r0_dm_y_ds_f32_0, r0_dm_y_ds_f32_0, 32);
+        // Wait, vshuff with 32 bytes will interleave 32-byte blocks.
+        // Actually, vshuff is complicated. Let's just use vlalign or vror to shift by 32 bytes and then combine.
+        HVX_Vector ms_0 = Q6_V_valign_VVI(r0_dm_y_ds_f32_0, r0_dm_y_ds_f32_0, 32);
+        // Now we need to blend dd_0 and dd_1 to get contiguous d*d and m*s.
+        // Wait, qdot_01 is 32 floats. qdot_01 corresponds to the first 512 elements, which is 16 blocks.
+        // So qdot_01 corresponds to the first 16 d*d and 16 m*s. Which is exactly r0_dm_y_ds_f32_0!
+        // qdot_01 layout: 16 floats. Wait, 4 blocks * 4 = 16 sums. Wait, qdot_01 is 32 floats!
+        // 512 elements = 512 / 32 = 16 blocks. So qdot_01 has 16 sums!
+        // Ah, r0y_qdot_0 is dot product of 256 elements = 8 blocks = 8 sums.
+        // r0y_qdot_1 is dot product of 256 elements = 8 sums.
+        // So r0y_qdot_01 is 16 sums. Not 32!
+        // The first 16 floats of r0y_qdot_01 are the sums, the remaining 16 floats are zero? No, rmpy_x4 returns 32 ints.
+        // Wait, hvx_vec_rmpy_x4 takes 2 HVX vectors (2x128 bytes = 256 bytes) and returns 1 HVX vector of 32 ints.
+        // Because each 128 bytes has 128 elements. 256 elements total. 256 / 4 = 64 sums?
+        // No, rmpy_x4 does sum of 4 products. 256 elements -> 64 ints.
+        // But hvx_vec_rmpy_x4 actually reduces to 32 ints! Let's check hvx_vec_rmpy_x4.
+        // hvx_vec_rmpy_x4 in ggml-hexagon.cpp:
+        // It sums 4 elements. 128 elements -> 32 ints.
+        // So 128 elements of r0 and vy -> 32 ints. Wait!
+        // qblk_size is 256 elements = 256 bytes (since Q8).
+        // hvx_vec_load_q8_1x4x8_full loads 8 vectors = 1024 bytes.
+        // hvx_vec_rmpy_x8_full returns 32 ints! It reduces 1024 elements to 32 ints?
+        // Wait, hvx_vec_rmpy_x8_full reduces 32x int8 elements to 1x int32 element.
+        // 1024 elements / 32 = 32 sums!
+        // So r0y_qdot is exactly 32 int32s!
+
+        HVX_Vector qdot = hvx_vec_rmpy_x8_full(r0_q, vy_q);
+        HVX_Vector qdot_f = Q6_Vsf_vcvt_Vw(qdot); // 32 floats
+
+        // qdot_f has 32 floats.
+        // We need 32 d*d and 32 m*s.
+        // But r0_dm_y_ds_f32_0 and _1 have 64 floats total.
+        // r0_dm_y_ds_f32_0 has 16 d*d and 16 m*s.
+        // r0_dm_y_ds_f32_1 has 16 d*d and 16 m*s.
+
+        // To multiply qdot_f by d*d and add m*s, we can just do it in a scalar loop to avoid mistakes,
+        // since it's only 32 elements and not in the innermost loop (it's once per 1024 elements).
+
+        float sums[32];
+        hvx_vec_store_u(sums, 32 * 4, qdot_f);
+
+        float dm01[32];
+        float dm23[32];
+        hvx_vec_store_u(dm01, 32 * 4, r0_dm_y_ds_f32_0);
+        hvx_vec_store_u(dm23, 32 * 4, r0_dm_y_ds_f32_1);
+
+        float acc[32];
+
+        for (int b = 0; b < 2; b++) {
+            for (int k = 0; k < 8; k++) {
+                int sum_idx = b * 8 + k;
+                int d_idx = b * 16 + k;
+                int m_idx = b * 16 + 8 + k;
+                acc[sum_idx] = sums[sum_idx] * dm01[d_idx] + dm01[m_idx];
+            }
+        }
+        for (int b = 0; b < 2; b++) {
+            for (int k = 0; k < 8; k++) {
+                int sum_idx = 16 + b * 8 + k;
+                int d_idx = b * 16 + k;
+                int m_idx = b * 16 + 8 + k;
+                acc[sum_idx] = sums[sum_idx] * dm23[d_idx] + dm23[m_idx];
+            }
+        }
+
+
+        r0_sum = Q6_Vsf_vadd_VsfVsf(r0_sum, hvx_vmemu(acc));
+    }
+
+    r0_sum = hvx_vec_reduce_sum_f32(r0_sum);
+    hvx_vec_store_u(s0, 4, r0_sum);
+}
+
+static void vec_dot_q4_1x4x2_q8_1x4x2_2x1(const int n, float * restrict s0,
+                                      const void * restrict vx0, const void * restrict vx1,
+                                      const void * restrict vy0) {
+    // simplified version wrapping 1x1
+    vec_dot_q4_1x4x2_q8_1x4x2_1x1(n, s0 + 0, vx0, vy0);
+    vec_dot_q4_1x4x2_q8_1x4x2_1x1(n, s0 + 1, vx1, vy0);
+}
+
+static void vec_dot_q4_1x4x2_q8_1x4x2_2x2(const int n, float * restrict s0, float * restrict s1,
+                                        const void * restrict vx0, const void * restrict vx1,
+                                        const void * restrict vy0, const void * restrict vy1) {
+    // simplified version wrapping 1x1
+    vec_dot_q4_1x4x2_q8_1x4x2_1x1(n, s0 + 0, vx0, vy0);
+    vec_dot_q4_1x4x2_q8_1x4x2_1x1(n, s0 + 1, vx1, vy0);
+    vec_dot_q4_1x4x2_q8_1x4x2_1x1(n, s1 + 0, vx0, vy1);
+    vec_dot_q4_1x4x2_q8_1x4x2_1x1(n, s1 + 1, vx1, vy1);
+}
+
 static void vec_dot_q8x4x2_q8x4x2_1x1(const int n, float * restrict s0, const void * restrict vx0, const void * restrict vy0) {
     assert(n % 32 == 0);  // min sub-block size
     assert((unsigned long) vx0 % 128 == 0);
@@ -2491,6 +2704,189 @@ static inline void quantize_block_f32_q8x1(float * restrict x, uint8_t * restric
     *(HVX_Vector *) y_q = vx_i8;
 }
 
+
+static inline size_t q8_1x4x2_row_size(uint32_t ne) {
+    uint32_t nblocks = (ne + QK_Q8_1x4x2 - 1) / QK_Q8_1x4x2;
+    return nblocks * (QK_Q8_1x4x2 + 32);  // 256 quants + 16 bytes d + 16 bytes s
+}
+
+static inline HVX_Vector_x8 hvx_vec_load_q8_1x4x8_full(const uint8_t * restrict ptr) {
+    HVX_Vector_x8 v;
+    v.val[0] = hvx_vmemu(ptr + 0*32);
+    v.val[1] = hvx_vmemu(ptr + 1*32);
+    v.val[2] = hvx_vmemu(ptr + 2*32);
+    v.val[3] = hvx_vmemu(ptr + 3*32);
+    v.val[4] = hvx_vmemu(ptr + 4*32);
+    v.val[5] = hvx_vmemu(ptr + 5*32);
+    v.val[6] = hvx_vmemu(ptr + 6*32);
+    v.val[7] = hvx_vmemu(ptr + 7*32);
+    return v;
+}
+
+static inline HVX_Vector_x8 hvx_vec_load_q8_1x4x8_partial(const uint8_t * restrict ptr, uint32_t nloe) {
+    return hvx_vec_load_q8_1x4x8_full(ptr);
+}
+
+static inline void quantize_block_f32_q8_1x1(float * restrict x, uint8_t * restrict y_q, uint8_t * restrict y_ds) {
+    assert((unsigned long) x % 128 == 0);
+    assert((unsigned long) y_q % 128 == 0);
+
+    HVX_Vector * vx = (HVX_Vector *) x;
+    HVX_Vector zero = Q6_V_vzero();
+
+    HVX_Vector vmax0_sf = hvx_vec_reduce_max_f32(hvx_vec_abs_f32(vx[0]));
+    HVX_Vector vmax1_sf = hvx_vec_reduce_max_f32(hvx_vec_abs_f32(vx[1]));
+    HVX_Vector vmax2_sf = hvx_vec_reduce_max_f32(hvx_vec_abs_f32(vx[2]));
+    HVX_Vector vmax3_sf = hvx_vec_reduce_max_f32(hvx_vec_abs_f32(vx[3]));
+
+    HVX_Vector vx0_qf = Q6_Vqf32_vsub_VsfVsf(vx[0], zero);
+    HVX_Vector vx1_qf = Q6_Vqf32_vsub_VsfVsf(vx[1], zero);
+    HVX_Vector vx2_qf = Q6_Vqf32_vsub_VsfVsf(vx[2], zero);
+    HVX_Vector vx3_qf = Q6_Vqf32_vsub_VsfVsf(vx[3], zero);
+
+    HVX_Vector vmax0_qf = Q6_Vqf32_vsub_VsfVsf(vmax0_sf, zero);
+    HVX_Vector vmax1_qf = Q6_Vqf32_vsub_VsfVsf(vmax1_sf, zero);
+    HVX_Vector vmax2_qf = Q6_Vqf32_vsub_VsfVsf(vmax2_sf, zero);
+    HVX_Vector vmax3_qf = Q6_Vqf32_vsub_VsfVsf(vmax3_sf, zero);
+
+    HVX_Vector vmax01_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vmax1_qf, vmax0_qf)));
+    HVX_Vector vmax23_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vmax3_qf, vmax2_qf)));
+
+    HVX_Vector vx01_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx1_qf, vx0_qf)));
+    HVX_Vector vx23_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx3_qf, vx2_qf)));
+
+    HVX_Vector vd01_qf16 = Q6_Vqf16_vmpy_VhfVhf(vmax01_hf, Q6_Vh_vsplat_R(0x2008));  // 1.0 / 127.0
+    HVX_Vector vd23_qf16 = Q6_Vqf16_vmpy_VhfVhf(vmax23_hf, Q6_Vh_vsplat_R(0x2008));  // 1.0 / 127.0
+    HVX_Vector vd01_hf   = Q6_Vhf_equals_Vqf16(vd01_qf16);
+    HVX_Vector vd23_hf   = Q6_Vhf_equals_Vqf16(vd23_qf16);
+
+    // Save d
+    hvx_vec_store_u(y_ds + 0, 2, vd01_hf);
+    HVX_Vector rotated_vd_hf = Q6_V_vror_VR(vd01_hf, 64);
+    hvx_vec_store_u(y_ds + 2, 2, rotated_vd_hf);
+    hvx_vec_store_u(y_ds + 4, 2, vd23_hf);
+    rotated_vd_hf = Q6_V_vror_VR(vd23_hf, 64);
+    hvx_vec_store_u(y_ds + 6, 2, rotated_vd_hf);
+
+    HVX_Vector v1d01_hf = hvx_vec_inverse_f16(vd01_hf);
+    HVX_Vector v1d23_hf = hvx_vec_inverse_f16(vd23_hf);
+
+    HVX_Vector vx01_d = Q6_Vhf_vmpy_VhfVhf(vx01_hf, v1d01_hf);
+    HVX_Vector vx23_d = Q6_Vhf_vmpy_VhfVhf(vx23_hf, v1d23_hf);
+
+    // Pack to int8
+    HVX_VectorPair vx_w_i16 = Q6_Ww_vcvt_VhfR(vx01_d);
+    HVX_Vector vx01_i8 = Q6_Vb_vshuffe_VbVb(Q6_V_vzero(), Q6_Vb_vdeal_Vb(Q6_Vb_vshuffe_VbVb(Q6_V_hi_W(vx_w_i16), Q6_V_lo_W(vx_w_i16))));
+    vx_w_i16 = Q6_Ww_vcvt_VhfR(vx23_d);
+    HVX_Vector vx23_i8 = Q6_Vb_vshuffe_VbVb(Q6_V_vzero(), Q6_Vb_vdeal_Vb(Q6_Vb_vshuffe_VbVb(Q6_V_hi_W(vx_w_i16), Q6_V_lo_W(vx_w_i16))));
+
+    HVX_Vector vx_i8 = Q6_V_vcombine_V_V(vx23_i8, vx01_i8);
+    *(HVX_Vector *) y_q = vx_i8;
+
+    // Calculate sum for q8_1
+    HVX_Vector vsum = hvx_vec_rmpy_x8_full(vx_i8, Q6_Vb_vsplat_R(0x01010101)); // sums 32 elements to 1 int32. Actually we need 4 sums for 4 groups of 32
+    // vsum contains 4 int32 sums.
+    // We need to convert them to float16, multiply by d, and save to s.
+    HVX_Vector vsum_f32 = Q6_Vsf_vcvt_Vw(vsum);
+    // Convert to QF32
+    HVX_Vector vsum_qf32 = Q6_Vqf32_vsub_VsfVsf(vsum_f32, zero);
+    // Deal to HF
+    HVX_Vector vsum_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(zero, vsum_qf32)));
+
+    // Combine vd01 and vd23 to match the 4 elements in vsum_hf.
+    // vd01_hf has d0, d1 at lane 0 and 32 (if it was 2 elements in 128 bytes).
+    // Actually vd01_hf contains identical elements replicated across 64 lanes.
+    // We can just multiply vsum_hf and the d values.
+    // Let's just do it directly.
+
+    // Extract the 4 int32 sums
+    int32_t sums[4];
+    hvx_vec_store_u(sums, 16, vsum);
+
+    ggml_half ds_buf[4];
+    ggml_half d_buf[4];
+    hvx_vec_store_u(d_buf + 0, 2, vd01_hf);
+    hvx_vec_store_u(d_buf + 1, 2, Q6_V_vror_VR(vd01_hf, 64));
+    hvx_vec_store_u(d_buf + 2, 2, vd23_hf);
+    hvx_vec_store_u(d_buf + 3, 2, Q6_V_vror_VR(vd23_hf, 64));
+
+    for (int j = 0; j < 4; j++) {
+        float s = sums[j] * GGML_FP16_TO_FP32(d_buf[j]);
+        ds_buf[j] = GGML_FP32_TO_FP16(s);
+    }
+
+    hvx_vec_store_u(y_ds + 8 + 0, 2, hvx_vec_repl_f16_half(ds_buf[0]));
+    hvx_vec_store_u(y_ds + 8 + 2, 2, hvx_vec_repl_f16_half(ds_buf[1]));
+    hvx_vec_store_u(y_ds + 8 + 4, 2, hvx_vec_repl_f16_half(ds_buf[2]));
+    hvx_vec_store_u(y_ds + 8 + 6, 2, hvx_vec_repl_f16_half(ds_buf[3]));
+}
+
+static void quantize_row_f32_q8_1x4x2(float * restrict x, uint8_t * restrict y, uint32_t k) {
+    assert(k % 32 == 0);
+    const uint32_t qk = QK_Q8_1x4x2;
+    const uint32_t nb = (k + qk - 1) / qk;
+
+    const uint32_t qrow_size = k;              // int8
+
+    const uint32_t dsblk_size = 8 * 2 * 2;     // 8x __fp16 for d, 8x __fp16 for s
+    const uint32_t qblk_size = QK_Q8_1x4x2;    // int8
+
+    uint8_t * restrict y_q = (y + 0);          // quants first
+    uint8_t * restrict y_ds = (y + qrow_size); // then d and s
+
+    uint8_t * restrict t_ds = (uint8_t *) x;
+
+    for (uint32_t i = 0; i < nb; i++) {
+        quantize_block_f32_q8_1x1(x + (i*2 + 0) * qk/2, y_q + (i*2 + 0) * qblk_size/2, t_ds + (i*2 + 0) * dsblk_size/2);
+        quantize_block_f32_q8_1x1(x + (i*2 + 1) * qk/2, y_q + (i*2 + 1) * qblk_size/2, t_ds + (i*2 + 1) * dsblk_size/2);
+    }
+
+    hvx_copy_f16_ua(y_ds, t_ds, nb * 16);
+}
+
+static void quantize_f32_q8_1x4x2(unsigned int nth, unsigned int ith, void * data) {
+    struct htp_matmul_context * mmctx = (struct htp_matmul_context *)data;
+    struct htp_ops_context * octx = mmctx->octx;
+
+    const struct htp_tensor * src = octx->src[1];
+    uint8_t * restrict dst = (uint8_t *)octx->src1_spad.data;
+    uint32_t nrows_per_thread = mmctx->src1_nrows_per_thread;
+
+    uint64_t t1 = HAP_perf_get_qtimer_count();
+
+    const uint32_t ne0 = src->ne[0];
+    const uint32_t ne1 = src->ne[1];
+    const uint32_t ne2 = src->ne[2];
+    const uint32_t ne3 = src->ne[3];
+
+    const uint32_t nrows = ne1 * ne2 * ne3;                             // total n_rows
+
+    const uint32_t ir_first = nrows_per_thread * ith;                   // first row
+    const uint32_t ir_last  = MIN(ir_first + nrows_per_thread, nrows);  // last row
+
+    const size_t src_row_size = src->nb[1];
+    const size_t dst_row_size = q8_1x4x2_row_size(ne0);
+
+    uint8_t * restrict src_data = (uint8_t *) src->data + (src_row_size * ir_first);
+    uint8_t * restrict dst_data = (uint8_t *) dst       + (dst_row_size * ir_first);
+
+    uint8_t * restrict tmp_data = (uint8_t *) octx->src0_spad.data;
+
+    for (uint32_t i = ir_first; i < ir_last; ++i) {
+        hex_l2fetch(src_data, src_row_size, src_row_size, 2);
+        hvx_copy_f32_aa(tmp_data, src_data, ne0);
+
+        quantize_row_f32_q8_1x4x2((float *) tmp_data, dst_data, ne0);
+        dst_data += dst_row_size;
+        src_data += src_row_size;
+    }
+
+    uint64_t t2 = HAP_perf_get_qtimer_count();
+
+    FARF(HIGH, "quantize-f32-q8_1x4: %u/%u : n-rows %u (%u:%u) row-size %u -> %u usec %u\n", ith, nth, nrows, ir_first,
+         ir_last, src_row_size, dst_row_size, (unsigned) HAP_perf_qtimer_count_to_us(t2 - t1));
+}
+
 static inline void quantize_block_f32_q8x2(float * restrict x, uint8_t * restrict y_q, uint8_t * restrict y_d) {
     assert((unsigned long) x % 128 == 0);
     assert((unsigned long) y_q % 128 == 0);
@@ -2752,6 +3148,12 @@ static int htp_mminit_vec_dot(struct htp_matmul_context * mmctx, enum htp_data_t
             mmctx->vec_dot_2x1 = vec_dot_q4x4x2_q8x4x2_2x1;
             mmctx->vec_dot_2x2 = vec_dot_q4x4x2_q8x4x2_2x2;
             return 0;
+        case HTP_TYPE_Q4_1:
+            mmctx->type        = "q4_1x4x2-f32";
+            mmctx->vec_dot_1x1 = vec_dot_q4_1x4x2_q8_1x4x2_1x1;
+            mmctx->vec_dot_2x1 = vec_dot_q4_1x4x2_q8_1x4x2_2x1;
+            mmctx->vec_dot_2x2 = vec_dot_q4_1x4x2_q8_1x4x2_2x2;
+            return 0;
         case HTP_TYPE_Q8_0:
             mmctx->type        = "q8x4x2-f32";
             mmctx->vec_dot_1x1 = vec_dot_q8x4x2_q8x4x2_1x1;
@@ -2894,8 +3296,8 @@ static int op_matmul_hvx(struct htp_ops_context * octx) {
             return HTP_STATUS_NO_SUPPORT;
         }
 
-        quant_job_func = quantize_f32_q8x4x2;
-        src1_row_size  = q8x4x2_row_size(ne10);
+        quant_job_func = src0->type == HTP_TYPE_Q4_1 ? quantize_f32_q8_1x4x2 : quantize_f32_q8x4x2;
+        src1_row_size  = src0->type == HTP_TYPE_Q4_1 ? q8_1x4x2_row_size(ne10) : q8x4x2_row_size(ne10);
         htp_mminit_spad(octx, dst_row_size, src0_row_size_padded, src1_row_size, src1_nrows, 0);
     }
 
@@ -3098,8 +3500,8 @@ int op_matmul_id(struct htp_ops_context * octx) {
         return HTP_STATUS_NO_SUPPORT;
     }
 
-    quant_job_func = quantize_f32_q8x4x2;
-    src1_row_size  = q8x4x2_row_size(ne10);
+    quant_job_func = src0->type == HTP_TYPE_Q4_1 ? quantize_f32_q8_1x4x2 : quantize_f32_q8x4x2;
+    src1_row_size  = src0->type == HTP_TYPE_Q4_1 ? q8_1x4x2_row_size(ne10) : q8x4x2_row_size(ne10);
 
     const size_t src2_spad_size_per_thread = hex_round_up(matrix_row_counts_size + matrix_row_map_size, 256);
     htp_mminit_spad(octx, dst_row_size, src0_row_size_padded, src1_row_size, src1_nrows, src2_spad_size_per_thread);
