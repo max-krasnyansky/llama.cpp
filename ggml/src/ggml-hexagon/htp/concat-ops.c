@@ -111,7 +111,7 @@ static void concat_thread_dim0_fast_src0_vgather_f32(unsigned int nth, unsigned 
                     uint8_t * src_ptr = src1_vtcm + i0_blk * 128 + c * type_size;
                     uint8_t * dst_ptr = dst_vtcm  + c * (ne10 * type_size) + i0_blk * type_size;
                     HVX_Vector v = Q6_V_vzero();
-                    Q6_vgather_ARMVw(&v, (Word32)src_ptr, 128, v_off);
+                    Q6_vgather_ARMVw(&v, (void*)src_ptr, ne10 * 128, v_off);
                     // Write 32 elements. If cur_ne10 < 32, padding protects next rows.
                     hvx_vec_store_u(dst_ptr, type_size * cur_ne10, v);
                 }
@@ -170,7 +170,7 @@ static void concat_thread_dim0_fast_src0_vgather_f16(unsigned int nth, unsigned 
                     uint8_t * src_ptr = src1_vtcm + i0_blk * 128 + c * type_size;
                     uint8_t * dst_ptr = dst_vtcm  + c * (ne10 * type_size) + i0_blk * type_size;
                     HVX_Vector v = Q6_V_vzero();
-                    Q6_vgather_ARMVh(&v, (Word32)src_ptr, 128, v_off);
+                    Q6_vgather_ARMVh(&v, (void*)src_ptr, ne10 * 128, v_off);
                     // Write 64 elements. If cur_ne10 < 64, padding protects next rows.
                     hvx_vec_store_u(dst_ptr, type_size * cur_ne10, v);
                 }
