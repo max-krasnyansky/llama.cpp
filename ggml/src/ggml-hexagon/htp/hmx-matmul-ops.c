@@ -33,6 +33,9 @@
 static const __fp16 q4_0_to_fp16_lut[64] __attribute__((aligned(VLEN))) = {
     -8, 0, -7, 0, -6, 0, -5, 0, -4, 0, -3, 0, -2, 0, -1, 0, 0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0,
 };
+static const __fp16 q4_1_to_fp16_lut[64] __attribute__((aligned(VLEN))) = {
+    0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0, 9, 0, 10, 0, 11, 0, 12, 0, 13, 0, 14, 0, 15, 0,
+};
 
 // MXFP4 dequantization LUT: maps 4-bit index to fp16 mantissa value
 // kvalues: 0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6
@@ -338,6 +341,7 @@ static void dequantize_x4x2_weight_to_fp16_tiles_task(
 
     const HVX_Vector vlut_cvt = (weight_type == HTP_TYPE_IQ4_NL) ? hvx_vmem(iq4_nl_to_fp16_lut) :
                                 (weight_type == HTP_TYPE_MXFP4)  ? hvx_vmem(mxfp4_to_fp16_lut) :
+                                (weight_type == HTP_TYPE_Q4_1)   ? hvx_vmem(q4_1_to_fp16_lut) :
                                                                    hvx_vmem(q4_0_to_fp16_lut);
 
     // vscatter setup: write dequantized K-values directly to transposed [K][N] tile positions.

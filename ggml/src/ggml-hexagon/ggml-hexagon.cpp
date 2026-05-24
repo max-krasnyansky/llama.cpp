@@ -370,7 +370,6 @@ static void pack_q4_1_quants(block_q4_1 * x, const uint8_t * qs, unsigned int bi
 static void repack_row_q4_1x4x2(uint8_t * y, const block_q4_1 * x, int64_t k) {
     static const int qk = QK_Q4_1x4x2;
     const int        nb = (k + qk - 1) / qk;
-    const int        nloe = k % qk;
 
     const int dblk_size = 8 * 2;
     const int mblk_size = 8 * 2;
@@ -537,8 +536,8 @@ static void repack_q4_1_q4x4x2(ggml_tensor * t, const void * data, size_t size) 
         memcpy(dst, buf_rp, n_rem_bytes);
     }
 
-    ggml_aligned_free(buf_rp);
-    ggml_aligned_free(buf_pd);
+    ggml_aligned_free(buf_rp, row_size_rp);
+    ggml_aligned_free(buf_pd, row_size_pd);
 }
 
 static void repack_q4x4x2_q4_1(void * data, const ggml_tensor * t, size_t size) {
@@ -576,8 +575,8 @@ static void repack_q4x4x2_q4_1(void * data, const ggml_tensor * t, size_t size) 
         memcpy(dst, buf_pd, n_rem_bytes);
     }
 
-    ggml_aligned_free(buf_rp);
-    ggml_aligned_free(buf_pd);
+    ggml_aligned_free(buf_rp, row_size_rp);
+    ggml_aligned_free(buf_pd, row_size_pd);
 }
 
 
@@ -608,7 +607,6 @@ static void pack_q4_0_quants(block_q4_0 * x, const uint8_t * qs, unsigned int bi
 static void repack_row_q4x4x2(uint8_t * y, const block_q4_0 * x, int64_t k) {
     static const int qk = QK_Q4_0x4x2;
     const int        nb = (k + qk - 1) / qk;  // number of blocks (padded)
-    const int        nloe = k % qk;           // leftovers
 
     const int dblk_size = 8 * 2;              // 8x __fp16
     const int qblk_size = qk / 2;             // int4
@@ -676,7 +674,6 @@ static void repack_row_q4x4x2(uint8_t * y, const block_q4_0 * x, int64_t k) {
 static void unpack_row_q4x4x2(block_q4_0 * x, const uint8_t * y, int64_t k) {
     static const int qk = QK_Q4_0x4x2;
     const int        nb = (k + qk - 1) / qk;  // number of blocks (padded)
-    const int        nloe = k % qk;           // leftovers
 
     const int dblk_size = 8 * 2;              // 8x __fp16
     const int qblk_size = qk / 2;             // int4
@@ -1295,7 +1292,6 @@ static void pack_mxfp4_quants(block_mxfp4 * x, const uint8_t * qs, unsigned int 
 static void repack_row_mxfp4x4x2(uint8_t * y, const block_mxfp4 * x, int64_t k) {
     static const int qk = QK_MXFP4x4x2;
     const int        nb = (k + qk - 1) / qk;  // number of blocks (padded)
-    const int        nloe = k % qk;           // leftovers
 
     const int eblk_size = 8 * 1;              // 8x E8M0
     const int qblk_size = qk / 2;             // int4
@@ -1364,7 +1360,6 @@ static void repack_row_mxfp4x4x2(uint8_t * y, const block_mxfp4 * x, int64_t k) 
 static void unpack_row_mxfp4x4x2(block_mxfp4 * x, const uint8_t * y, int64_t k) {
     static const int qk = QK_MXFP4x4x2;
     const int        nb = (k + qk - 1) / qk;  // number of blocks (padded)
-    const int        nloe = k % qk;           // leftovers
 
     const int eblk_size = 8 * 1;              // 8x E8M0
     const int qblk_size = qk / 2;             // int4
