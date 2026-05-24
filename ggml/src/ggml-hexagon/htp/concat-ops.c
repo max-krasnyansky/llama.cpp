@@ -54,22 +54,22 @@ static void concat_2d_f32_transposed(unsigned int nth, unsigned int ith, void * 
 
         uint32_t src0_row_bytes = src0_ne0 * sizeof(float);
         uint8_t * src0_ptr = (uint8_t *)src0->data + i * src0->nb[1];
-        dma_queue_push_2d(q, src0_ptr, spad0_base,
-                          src0_row_bytes, current_block_i,
-                          src0->nb[1], spad0_row_bytes);
+        dma_queue_push(q, dma_make_ptr(spad0_base, src0_ptr), spad0_row_bytes, src0->nb[1], src0_row_bytes, current_block_i);
+
+
 
         uint32_t src1_width_bytes = current_block_i * sizeof(float);
         uint8_t * src1_ptr = (uint8_t *)src1->data + i * src1->nb[1];
-        dma_queue_push_2d(q, src1_ptr, spad1_base,
-                          src1_width_bytes, src1_ne0,
-                          src1->nb[0], spad1_stride);
+        dma_queue_push(q, dma_make_ptr(spad1_base, src1_ptr), spad1_stride, src1->nb[0], src1_width_bytes, src1_ne0);
 
-        dma_queue_wait(q);
+
+
+        dma_queue_pop(q);
 
         for (uint32_t j = 0; j < src1_ne0_padded; j += 32) {
             for (uint32_t ii = 0; ii < current_block_i; ii++) {
                 HVX_Vector v;
-                Word32 rt = (Word32)(size_t)(spad1_base + j * spad1_stride + ii * sizeof(float));
+                size_t rt = (size_t)(spad1_base + j * spad1_stride + ii * sizeof(float));
                 Q6_vgather_ARMVw(&v, rt, mu, vv);
                 uint8_t * dst_ptr = spad0_base + ii * spad0_row_bytes + (src0_ne0 + j) * sizeof(float);
                 hvx_vmemu(dst_ptr) = v;
@@ -77,10 +77,10 @@ static void concat_2d_f32_transposed(unsigned int nth, unsigned int ith, void * 
         }
 
         uint8_t * dst_ptr = (uint8_t *)dst->data + i * dst->nb[1];
-        dma_queue_push_2d(q, spad0_base, dst_ptr,
-                          (src0_ne0 + src1_ne0) * sizeof(float), current_block_i,
-                          spad0_row_bytes, dst->nb[1]);
-        dma_queue_wait(q);
+        dma_queue_push(q, dma_make_ptr(dst_ptr, spad0_base), dst->nb[1], spad0_row_bytes, (src0_ne0 + src1_ne0) * sizeof(float), current_block_i);
+
+
+        dma_queue_pop(q);
     }
 }
 
@@ -123,22 +123,22 @@ static void concat_2d_f16_transposed(unsigned int nth, unsigned int ith, void * 
 
         uint32_t src0_row_bytes = src0_ne0 * sizeof(__fp16);
         uint8_t * src0_ptr = (uint8_t *)src0->data + i * src0->nb[1];
-        dma_queue_push_2d(q, src0_ptr, spad0_base,
-                          src0_row_bytes, current_block_i,
-                          src0->nb[1], spad0_row_bytes);
+        dma_queue_push(q, dma_make_ptr(spad0_base, src0_ptr), spad0_row_bytes, src0->nb[1], src0_row_bytes, current_block_i);
+
+
 
         uint32_t src1_width_bytes = current_block_i * sizeof(__fp16);
         uint8_t * src1_ptr = (uint8_t *)src1->data + i * src1->nb[1];
-        dma_queue_push_2d(q, src1_ptr, spad1_base,
-                          src1_width_bytes, src1_ne0,
-                          src1->nb[0], spad1_stride);
+        dma_queue_push(q, dma_make_ptr(spad1_base, src1_ptr), spad1_stride, src1->nb[0], src1_width_bytes, src1_ne0);
 
-        dma_queue_wait(q);
+
+
+        dma_queue_pop(q);
 
         for (uint32_t j = 0; j < src1_ne0_padded; j += 64) {
             for (uint32_t ii = 0; ii < current_block_i; ii++) {
                 HVX_Vector v;
-                Word32 rt = (Word32)(size_t)(spad1_base + j * spad1_stride + ii * sizeof(__fp16));
+                size_t rt = (size_t)(spad1_base + j * spad1_stride + ii * sizeof(__fp16));
                 Q6_vgather_ARMVh(&v, rt, mu, vv);
                 uint8_t * dst_ptr = spad0_base + ii * spad0_row_bytes + (src0_ne0 + j) * sizeof(__fp16);
                 hvx_vmemu(dst_ptr) = v;
@@ -146,10 +146,10 @@ static void concat_2d_f16_transposed(unsigned int nth, unsigned int ith, void * 
         }
 
         uint8_t * dst_ptr = (uint8_t *)dst->data + i * dst->nb[1];
-        dma_queue_push_2d(q, spad0_base, dst_ptr,
-                          (src0_ne0 + src1_ne0) * sizeof(__fp16), current_block_i,
-                          spad0_row_bytes, dst->nb[1]);
-        dma_queue_wait(q);
+        dma_queue_push(q, dma_make_ptr(dst_ptr, spad0_base), dst->nb[1], spad0_row_bytes, (src0_ne0 + src1_ne0) * sizeof(__fp16), current_block_i);
+
+
+        dma_queue_pop(q);
     }
 }
 
@@ -171,7 +171,7 @@ static void concat_generic(unsigned int nth, unsigned int ith, void * data) {
     const uint32_t start_idx = MIN(ith * chunk_size, total_elements);
     const uint32_t end_idx   = MIN(start_idx + chunk_size, total_elements);
 
-    // Naive scalar element-wise copy.
+    Naive scalar element-wise copy.
     for (uint32_t idx = start_idx; idx < end_idx; idx++) {
         uint32_t i0 = idx % ne[0];
         uint32_t i1 = (idx / ne[0]) % ne[1];
@@ -232,7 +232,7 @@ int op_concat(struct htp_ops_context * octx) {
 
         cctx.nrows_per_thread = hmx_ceil_div(dst->ne[1], n_threads);
 
-        // Allocate VTCM
+        Allocate VTCM
         uint32_t spad1_stride = block_i * type_size;
 
         uint32_t src1_ne0_padded = hex_round_up(src1->ne[0], block_i);
