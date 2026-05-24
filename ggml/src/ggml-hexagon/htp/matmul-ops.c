@@ -410,11 +410,11 @@ static void vec_dot_q4x4x2_q8x4x2_1x1(const int n, float * restrict s0, const vo
 
     const uint32_t qk = QK_Q4_0x4x2 * 4;
 
-    const uint32_t x_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t x_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t x_qblk_size = qk / 2;                                      // int4
     const uint32_t x_qrow_size = n / 2;                                       // int4 (not padded)
 
-    const uint32_t y_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t y_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t y_qblk_size = qk;                                          // int8
     const uint32_t y_qrow_size = n;                                           // int8 (not padded)
 
@@ -488,11 +488,11 @@ static void vec_dot_q4x4x2_q8x4x2_2x1(const int n, float * restrict s0,
 
     const uint32_t qk = QK_Q4_0x4x2 * 4;
 
-    const uint32_t x_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t x_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t x_qblk_size = qk / 2;                                      // int4
     const uint32_t x_qrow_size = n / 2;                                       // int4 (not padded)
 
-    const uint32_t y_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t y_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t y_qblk_size = qk;                                          // int8
     const uint32_t y_qrow_size = n;                                           // int8 (not padded)
 
@@ -583,11 +583,11 @@ static void vec_dot_q4x4x2_q8x4x2_2x2(const int n, float * restrict s0, float * 
 
     const uint32_t qk = QK_Q4_0x4x2 * 4;
 
-    const uint32_t x_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t x_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t x_qblk_size = qk / 2;                                      // int4
     const uint32_t x_qrow_size = n / 2;                                       // int4 (not padded)
 
-    const uint32_t y_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t y_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t y_qblk_size = qk;                                          // int8
     const uint32_t y_qrow_size = n;                                           // int8 (not padded)
 
@@ -787,11 +787,11 @@ static void vec_dot_q8x4x2_q8x4x2_2x1(const int n, float * restrict s0,
 
     const uint32_t qk = QK_Q4_0x4x2 * 4;
 
-    const uint32_t x_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t x_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t x_qblk_size = qk;                                          // int8
     const uint32_t x_qrow_size = n;                                           // int8 (not padded)
 
-    const uint32_t y_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t y_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t y_qblk_size = qk;                                          // int8
     const uint32_t y_qrow_size = n;                                           // int8 (not padded)
 
@@ -882,11 +882,11 @@ static void vec_dot_q8x4x2_q8x4x2_2x2(const int n, float * restrict s0, float * 
 
     const uint32_t qk = QK_Q8_0x4x2 * 4;
 
-    const uint32_t x_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t x_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t x_qblk_size = qk;                                          // int8
     const uint32_t x_qrow_size = n;                                           // int8 (not padded)
 
-    const uint32_t y_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t y_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t y_qblk_size = qk;                                          // int8
     const uint32_t y_qrow_size = n;                                           // int8 (not padded)
 
@@ -1015,11 +1015,11 @@ static void vec_dot_iq4nlx4x2_q8x4x2_1x1(const int n,
 
     const uint32_t qk = QK_Q4_0x4x2 * 4;
 
-    const uint32_t x_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t x_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t x_qblk_size = qk / 2;                                      // int4
     const uint32_t x_qrow_size = n / 2;                                       // int4 (not padded)
 
-    const uint32_t y_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t y_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t y_qblk_size = qk;                                          // int8
     const uint32_t y_qrow_size = n;                                           // int8 (not padded)
 
@@ -1088,11 +1088,11 @@ static void vec_dot_iq4nlx4x2_q8x4x2_2x1(const int n,
 
     const uint32_t qk = QK_Q4_0x4x2 * 4;
 
-    const uint32_t x_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t x_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t x_qblk_size = qk / 2;                                      // int4
     const uint32_t x_qrow_size = n / 2;                                       // int4 (not padded)
 
-    const uint32_t y_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t y_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t y_qblk_size = qk;                                          // int8
     const uint32_t y_qrow_size = n;                                           // int8 (not padded)
 
@@ -1407,7 +1407,7 @@ static void vec_dot_mxfp4x4x2_q8x4x2_2x1(const int n, float * restrict s0,
     const uint32_t x_qblk_size = qk / 2;                                      // fp4
     const uint32_t x_qrow_size = n / 2;                                       // fp4 (not padded)
 
-    const uint32_t y_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t y_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t y_qblk_size = qk;                                          // int8
     const uint32_t y_qrow_size = n;                                           // int8 (not padded)
 
@@ -1538,7 +1538,7 @@ static void vec_dot_mxfp4x4x2_q8x4x2_2x2(const int n, float * restrict s0, float
     const uint32_t x_qblk_size = qk / 2;                                      // fp4
     const uint32_t x_qrow_size = n / 2;                                       // fp4 (not padded)
 
-    const uint32_t y_dblk_size = 8 * 4 * 2;                                   // 32x __fp16
+    const uint32_t y_dblk_size = 8 * 4 * 2;                                       // 8x __fp16
     const uint32_t y_qblk_size = qk;                                          // int8
     const uint32_t y_qrow_size = n;                                           // int8 (not padded)
 
@@ -2458,6 +2458,7 @@ static inline void quantize_block_f32_q8x1(float * restrict x, uint8_t * restric
     HVX_Vector vmax2_qf = Q6_Vqf32_vsub_VsfVsf(vmax2_sf, zero); // replicated over all lanes
     HVX_Vector vmax3_qf = Q6_Vqf32_vsub_VsfVsf(vmax3_sf, zero); // replicated over all lanes
 
+
     // Combine and convert to fp16
     HVX_Vector vmax01_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vmax1_qf, vmax0_qf)));
     HVX_Vector vmax23_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vmax3_qf, vmax2_qf)));
@@ -2466,10 +2467,8 @@ static inline void quantize_block_f32_q8x1(float * restrict x, uint8_t * restric
     HVX_Vector vx01_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx1_qf, vx0_qf)));
     HVX_Vector vx23_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx3_qf, vx2_qf)));
 
-    HVX_Vector vd01_qf16 = Q6_Vqf16_vmpy_VhfVhf(vmax01_hf, Q6_Vh_vsplat_R(0x2008));  // 1.0 / 127.0
-    HVX_Vector vd23_qf16 = Q6_Vqf16_vmpy_VhfVhf(vmax23_hf, Q6_Vh_vsplat_R(0x2008));  // 1.0 / 127.0
-    HVX_Vector vd01_hf   = Q6_Vhf_equals_Vqf16(vd01_qf16);
-    HVX_Vector vd23_hf   = Q6_Vhf_equals_Vqf16(vd23_qf16);
+    HVX_Vector vd01_hf = Q6_Vhf_equals_Wqf32(Q6_Wqf32_vmpy_VhfVhf(vmax01_hf, Q6_Vh_vsplat_R(0x2008)));  // 1.0 / 127.0
+    HVX_Vector vd23_hf = Q6_Vhf_equals_Wqf32(Q6_Wqf32_vmpy_VhfVhf(vmax23_hf, Q6_Vh_vsplat_R(0x2008)));  // 1.0 / 127.0
 
     hvx_vec_store_u(y_d + 0, 2, vd01_hf);
     HVX_Vector rotated_vd_hf = Q6_V_vror_VR(vd01_hf, 64);
@@ -2482,8 +2481,9 @@ static inline void quantize_block_f32_q8x1(float * restrict x, uint8_t * restric
     // Divide input by the scale
     HVX_Vector vd01_inv_hf = hvx_vec_inverse_f16(vd01_hf);
     HVX_Vector vd23_inv_hf = hvx_vec_inverse_f16(vd23_hf);
-    vx01_hf              = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(vx01_hf, vd01_inv_hf));
-    vx23_hf              = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(vx23_hf, vd23_inv_hf));
+    vx01_hf              = Q6_Vhf_equals_Wqf32(Q6_Wqf32_vmpy_VhfVhf(vx01_hf, vd01_inv_hf));
+    vx23_hf              = Q6_Vhf_equals_Wqf32(Q6_Wqf32_vmpy_VhfVhf(vx23_hf, vd23_inv_hf));
+
 
     // Convert to int8
     HVX_Vector vx01_i16 = hvx_vec_i16_from_hf_rnd_sat(vx01_hf);
@@ -2609,6 +2609,7 @@ static inline void quantize_block_f32_q8_1x1(float * restrict x, uint8_t * restr
     HVX_Vector vmax2_qf = Q6_Vqf32_vsub_VsfVsf(vmax2_sf, zero); // replicated over all lanes
     HVX_Vector vmax3_qf = Q6_Vqf32_vsub_VsfVsf(vmax3_sf, zero); // replicated over all lanes
 
+
     // Combine and convert to fp16
     HVX_Vector vmax01_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vmax1_qf, vmax0_qf)));
     HVX_Vector vmax23_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vmax3_qf, vmax2_qf)));
@@ -2617,10 +2618,8 @@ static inline void quantize_block_f32_q8_1x1(float * restrict x, uint8_t * restr
     HVX_Vector vx01_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx1_qf, vx0_qf)));
     HVX_Vector vx23_hf = Q6_Vh_vdeal_Vh(Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(vx3_qf, vx2_qf)));
 
-    HVX_Vector vd01_qf16 = Q6_Vqf16_vmpy_VhfVhf(vmax01_hf, Q6_Vh_vsplat_R(0x2008));  // 1.0 / 127.0
-    HVX_Vector vd23_qf16 = Q6_Vqf16_vmpy_VhfVhf(vmax23_hf, Q6_Vh_vsplat_R(0x2008));  // 1.0 / 127.0
-    HVX_Vector vd01_hf   = Q6_Vhf_equals_Vqf16(vd01_qf16);
-    HVX_Vector vd23_hf   = Q6_Vhf_equals_Vqf16(vd23_qf16);
+    HVX_Vector vd01_hf = Q6_Vhf_equals_Wqf32(Q6_Wqf32_vmpy_VhfVhf(vmax01_hf, Q6_Vh_vsplat_R(0x2008)));  // 1.0 / 127.0
+    HVX_Vector vd23_hf = Q6_Vhf_equals_Wqf32(Q6_Wqf32_vmpy_VhfVhf(vmax23_hf, Q6_Vh_vsplat_R(0x2008)));  // 1.0 / 127.0
 
     hvx_vec_store_u(y_d + 0, 2, vd01_hf);
     HVX_Vector rotated_vd_hf = Q6_V_vror_VR(vd01_hf, 64);
@@ -2633,15 +2632,18 @@ static inline void quantize_block_f32_q8_1x1(float * restrict x, uint8_t * restr
     // Divide input by the scale
     HVX_Vector vd01_inv_hf = hvx_vec_inverse_f16(vd01_hf);
     HVX_Vector vd23_inv_hf = hvx_vec_inverse_f16(vd23_hf);
-    vx01_hf              = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(vx01_hf, vd01_inv_hf));
-    vx23_hf              = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(vx23_hf, vd23_inv_hf));
+    vx01_hf              = Q6_Vhf_equals_Wqf32(Q6_Wqf32_vmpy_VhfVhf(vx01_hf, vd01_inv_hf));
+    vx23_hf              = Q6_Vhf_equals_Wqf32(Q6_Wqf32_vmpy_VhfVhf(vx23_hf, vd23_inv_hf));
+
 
     // Convert back to integer types
-    HVX_Vector vx01_i16 = hvx_vec_i16_from_hf_rnd_sat(vx01_hf);
-    HVX_Vector vx23_i16 = hvx_vec_i16_from_hf_rnd_sat(vx23_hf);
-    HVX_Vector vx_i8    = Q6_Vb_vpack_VhVh_sat(vx23_i16, vx01_i16);
+    HVX_VectorPair vi01_wp = Q6_Ww_vcvt_VhfR(vx01_hf, 0);
+    HVX_Vector vi01_b = Q6_Vb_vshuffe_VbVb(zero, Q6_Vb_vdeal_Vb(Q6_Vb_vshuffe_VbVb(Q6_V_hi_W(vi01_wp), Q6_V_lo_W(vi01_wp))));
+    HVX_VectorPair vi23_wp = Q6_Ww_vcvt_VhfR(vx23_hf, 0);
+    HVX_Vector vi23_b = Q6_Vb_vshuffe_VbVb(zero, Q6_Vb_vdeal_Vb(Q6_Vb_vshuffe_VbVb(Q6_V_hi_W(vi23_wp), Q6_V_lo_W(vi23_wp))));
 
-    *(HVX_UVector *) (y_q + 0)  = vx_i8;
+    *(HVX_UVector *) (y_q + 0)  = vi01_b;
+    *(HVX_UVector *) (y_q + 64) = vi23_b;
 
     // Now we need to store them as fp16
     HVX_Vector sum0_qf = Q6_Vqf32_vsub_VsfVsf(sum_sf_0, zero);
@@ -2737,13 +2739,14 @@ static void vec_dot_q4_1x4x2_q8_1x4x2_1x1(const int n, float * restrict s0, cons
     const uint32_t x_mblk_size = 8 * 4 * 2;
     const uint32_t x_qblk_size = qk / 2;
     const uint32_t x_qrow_size = n / 2;
-    const uint32_t x_drow_size = (n / (QK_Q4_1x4x2)) * x_dblk_size;
+    const uint32_t x_drow_size = (n / (QK_Q4_1x4x2)) * 8 * 2;
 
     const uint32_t y_dblk_size = 8 * 4 * 2;
     const uint32_t y_sblk_size = 8 * 4 * 2;
     const uint32_t y_qblk_size = qk;
     const uint32_t y_qrow_size = n;
-    const uint32_t y_drow_size = (n / (QK_Q8_1x4x2)) * y_dblk_size;
+    const uint32_t y_drow_size = (n / (QK_Q8_1x4x2)) * 8 * 2;
+    // Note: The quantize_row dynamically sets y_dblk_size to 8 * 2 and y_sblk_size to 8 * 2.
 
     const uint8_t * restrict r0_x_q = ((const uint8_t *) vx0 + 0);
     const uint8_t * restrict r0_x_d = ((const uint8_t *) vx0 + x_qrow_size);
@@ -2801,7 +2804,8 @@ static void vec_dot_q4_1x4x2_q8_1x4x2_1x1(const int n, float * restrict s0, cons
         r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_fa, r0_sum));
     }
 
-    *s0 = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r0_sum));
+    r0_sum = hvx_vec_reduce_sum_f32(r0_sum);
+    hvx_vec_store_u(s0, 4, r0_sum); // The reduced vector has the same sum across all elements
 }
 
 static void vec_dot_q4_1x4x2_q8_1x4x2_2x1(const int n, float * restrict s0,
@@ -2818,13 +2822,14 @@ static void vec_dot_q4_1x4x2_q8_1x4x2_2x1(const int n, float * restrict s0,
     const uint32_t x_mblk_size = 8 * 4 * 2;
     const uint32_t x_qblk_size = qk / 2;
     const uint32_t x_qrow_size = n / 2;
-    const uint32_t x_drow_size = (n / (QK_Q4_1x4x2)) * x_dblk_size;
+    const uint32_t x_drow_size = (n / (QK_Q4_1x4x2)) * 8 * 2;
 
     const uint32_t y_dblk_size = 8 * 4 * 2;
     const uint32_t y_sblk_size = 8 * 4 * 2;
     const uint32_t y_qblk_size = qk;
     const uint32_t y_qrow_size = n;
-    const uint32_t y_drow_size = (n / (QK_Q8_1x4x2)) * y_dblk_size;
+    const uint32_t y_drow_size = (n / (QK_Q8_1x4x2)) * 8 * 2;
+    // Note: The quantize_row dynamically sets y_dblk_size to 8 * 2 and y_sblk_size to 8 * 2.
 
     const uint8_t * restrict r0_x_q = ((const uint8_t *) vx0 + 0);
     const uint8_t * restrict r0_x_d = ((const uint8_t *) vx0 + x_qrow_size);
@@ -2909,8 +2914,8 @@ static void vec_dot_q4_1x4x2_q8_1x4x2_2x1(const int n, float * restrict s0,
         r1_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r1_fa, r1_sum));
     }
 
-    s0[0] = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r0_sum));
-    s0[1] = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r1_sum));
+    HVX_Vector rsum = hvx_vec_reduce_sum_f32x2(r0_sum, r1_sum);
+    hvx_vec_store_u(s0, 8, rsum);
 }
 
 static void vec_dot_q4_1x4x2_q8_1x4x2_2x2(const int n, float * restrict s0, float * restrict s1,
@@ -2928,13 +2933,14 @@ static void vec_dot_q4_1x4x2_q8_1x4x2_2x2(const int n, float * restrict s0, floa
     const uint32_t x_mblk_size = 8 * 4 * 2;
     const uint32_t x_qblk_size = qk / 2;
     const uint32_t x_qrow_size = n / 2;
-    const uint32_t x_drow_size = (n / (QK_Q4_1x4x2)) * x_dblk_size;
+    const uint32_t x_drow_size = (n / (QK_Q4_1x4x2)) * 8 * 2;
 
     const uint32_t y_dblk_size = 8 * 4 * 2;
     const uint32_t y_sblk_size = 8 * 4 * 2;
     const uint32_t y_qblk_size = qk;
     const uint32_t y_qrow_size = n;
-    const uint32_t y_drow_size = (n / (QK_Q8_1x4x2)) * y_dblk_size;
+    const uint32_t y_drow_size = (n / (QK_Q8_1x4x2)) * 8 * 2;
+    // Note: The quantize_row dynamically sets y_dblk_size to 8 * 2 and y_sblk_size to 8 * 2.
 
     const uint8_t * restrict r0_x_q = ((const uint8_t *) vx0 + 0);
     const uint8_t * restrict r0_x_d = ((const uint8_t *) vx0 + x_qrow_size);
@@ -3061,10 +3067,10 @@ static void vec_dot_q4_1x4x2_q8_1x4x2_2x2(const int n, float * restrict s0, floa
         r11_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r11_fa, r11_sum));
     }
 
-    s0[0] = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r00_sum));
-    s0[1] = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r10_sum));
-    s1[0] = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r01_sum));
-    s1[1] = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(r11_sum));
+    HVX_Vector r0_r1_c0_sum = hvx_vec_reduce_sum_f32x2(r00_sum, r10_sum);
+    HVX_Vector r0_r1_c1_sum = hvx_vec_reduce_sum_f32x2(r01_sum, r11_sum);
+    hvx_vec_store_u(s0, 8, r0_r1_c0_sum);
+    hvx_vec_store_u(s1, 8, r0_r1_c1_sum);
 }
 
 static void quantize_row_f32_q8x4x2(float * restrict x, uint8_t * restrict y, uint32_t k) {

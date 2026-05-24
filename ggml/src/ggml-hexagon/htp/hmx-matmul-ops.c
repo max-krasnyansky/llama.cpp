@@ -477,8 +477,8 @@ static void dequantize_x4x2_weight_to_fp16_tiles_task(
                     v1 = Q6_V_vzero();
                 }
 
-                HVX_Vector v_interleaved = Q6_V_vshuff_VVR(v1, v0, 2);
-                q6op_vscatter_A(vtcm_dst, v_off, v_interleaved, q_mask64);
+                HVX_Vector v_interleaved = Q6_Vh_vshuff_Vh(Q6_W_vcombine_VV(v1, v0));
+                Q6_vscatter_QRMVwV(q_mask64, (size_t) vtcm_dst, 2 * HMX_FP16_TILE_SIZE - 1, v_off, v_interleaved);
                 v_off = Q6_Vw_vadd_VwVw(v_off, v_scat_step);
             }
             kt++; t++;
