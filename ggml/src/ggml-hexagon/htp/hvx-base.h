@@ -66,19 +66,19 @@ static inline HVX_Vector hvx_vec_repl4(HVX_Vector v) {
 }
 
 static inline float hvx_vec_get_f32(HVX_Vector v) {
-    float __attribute__((aligned(128))) x;
+    float __attribute__((aligned(128))) x = 0;
     hvx_vec_store_a(&x, 4, v);
     return x;
 }
 
 static inline int32_t hvx_vec_get_i32(HVX_Vector v) {
-    int32_t __attribute__((aligned(128))) x;
+    int32_t __attribute__((aligned(128))) x = 0;
     hvx_vec_store_a(&x, 4, v);
     return x;
 }
 
 static inline _Float16 hvx_vec_get_f16(HVX_Vector v) {
-    _Float16 __attribute__((aligned(128))) x;
+    _Float16 __attribute__((aligned(128))) x = 0;
     hvx_vec_store_a(&x, 2, v);
     return x;
 }
