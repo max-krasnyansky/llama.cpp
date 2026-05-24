@@ -353,6 +353,15 @@ static void unpack_q4_1_quants(uint8_t * qs, const block_q4_1 * x, int bi) {
         qs[bi * qk + i]              = x0 & 0x0F;
         qs[bi * qk + i + (qk / 2)]   = x0 >> 4;
     }
+
+static void pack_q4_1_quants(block_q4_1 * x, const uint8_t * qs, int bi) {
+    static const int qk = QK4_1; // 32
+    for (int i = 0; i < qk / 2; i++) {
+        const uint8_t x0 = qs[bi * qk + i];
+        const uint8_t x1 = qs[bi * qk + i + qk / 2];
+        x->qs[i]         = x0 | (x1 << 4);
+    }
+}
 }
 
 

@@ -310,6 +310,24 @@ static inline HVX_Vector_x8 hvx_vec_load_q8x4x8_partial(const uint8_t * restrict
     return hvx_vec_load_q8x4x8_full(ptr);
 }
 
+static inline HVX_Vector_x8 hvx_vec_load_q8_1x4x8_full(const uint8_t * restrict ptr) {
+    HVX_Vector_x8 v;
+    v.val[0] = hvx_vmemu(ptr + 0*32);
+    v.val[1] = hvx_vmemu(ptr + 1*32);
+    v.val[2] = hvx_vmemu(ptr + 2*32);
+    v.val[3] = hvx_vmemu(ptr + 3*32);
+    v.val[4] = hvx_vmemu(ptr + 4*32);
+    v.val[5] = hvx_vmemu(ptr + 5*32);
+    v.val[6] = hvx_vmemu(ptr + 6*32);
+    v.val[7] = hvx_vmemu(ptr + 7*32);
+    return v;
+}
+
+static inline HVX_Vector_x8 hvx_vec_load_q8_1x4x8_partial(const uint8_t * restrict ptr, uint32_t nloe) {
+    return hvx_vec_load_q8_1x4x8_full(ptr);
+}
+
+
 // Reduce multiply 1024 x 1024 int8 elements (32x q4/8 blocks in 8x HVX vectors).
 // Accumulate each block into a single int32 value.
 // Return a single HVX vector with 32x int32 accumulators.
@@ -728,125 +746,17 @@ static void vec_dot_q4_1x4x2_q8_1x4x2_1x1(const int n, float * restrict s0, cons
         HVX_Vector_x8 r0_q = (i == nb - 1 && nloe) ? hvx_vec_load_q4x4x8_partial(r0_x_q + i * x_qblk_size, nloe) : hvx_vec_load_q4x4x8_full(r0_x_q + i * x_qblk_size);
         HVX_Vector_x8 vy_q = (i == nb - 1 && nloe) ? hvx_vec_load_q8_1x4x8_partial(y_q + i * y_qblk_size, nloe) : hvx_vec_load_q8_1x4x8_full(y_q + i * y_qblk_size);
 
-        HVX_Vector r0_dm_hf01 = hvx_vmemu(r0_x_dm + i * x_dblk_size + 0);
-        HVX_Vector r0_dm_hf23 = hvx_vmemu(r0_x_dm + i * x_dblk_size + 64);
-        HVX_Vector y_ds_hf01 = hvx_vmemu(y_ds + i * y_dsblk_size + 0);
-        HVX_Vector y_ds_hf23 = hvx_vmemu(y_ds + i * y_dsblk_size + 64);
-
-        HVX_Vector r0_d_hf01, r0_m_hf01;
-        HVX_Vector r0_d_hf23, r0_m_hf23;
-        HVX_Vector y_d_hf01, y_s_hf01;
-        HVX_Vector y_d_hf23, y_s_hf23;
-
-        // dm layout: 32 bytes d, 32 bytes m for the first 64 bytes. So we can extract d and m
-        // Actually the layout is: 16 bytes d from 4 blocks, 16 bytes d from next 4. So 32 bytes d.
-        // Then 32 bytes m. So the first 32 bytes are d, the next 32 bytes are m.
-        // Let's adjust r0_d_hf and r0_m_hf.
-        // Wait, hvx_vmemu loads 128 bytes. We can load the whole dm block in one go!
-        HVX_Vector r0_dm = hvx_vmemu(r0_x_dm + i * x_dblk_size);
-        // r0_dm has 32 bytes d, 32 bytes m, 32 bytes d, 32 bytes m (because 128 bytes loaded)
-        // Wait, x_dblk_size is 128 bytes. The first 32 are d, next 32 m, next 32 d, next 32 m.
-        // Let's extract d and m
-        HVX_Vector r0_d_hf = Q6_V_vshuff_VVR(r0_dm, r0_dm, 32); // this will interleave but it's easier to just use alignment
-        // Actually, let's unpack d and m using vshuff or similar, or just cast
-
-        // Let's use scalar loop for the tail dot product sum of scales since it's only 16 elements per HVX_Vector_x8
-        // Actually, x_dblk_size is 128 bytes. 64 elements.
-
-        // Wait, we need to do q_dot = dot(r0_q, vy_q) -> 32 elements.
-        HVX_Vector r0y_qdot_0 = hvx_vec_rmpy_x4(r0_q.val[0], vy_q.val[0], r0_q.val[1], vy_q.val[1]);
-        HVX_Vector r0y_qdot_1 = hvx_vec_rmpy_x4(r0_q.val[2], vy_q.val[2], r0_q.val[3], vy_q.val[3]);
-        HVX_Vector r0y_qdot_2 = hvx_vec_rmpy_x4(r0_q.val[4], vy_q.val[4], r0_q.val[5], vy_q.val[5]);
-        HVX_Vector r0y_qdot_3 = hvx_vec_rmpy_x4(r0_q.val[6], vy_q.val[6], r0_q.val[7], vy_q.val[7]);
-
-        HVX_Vector r0y_qdot_01 = Q6_Vw_vadd_VwVw(r0y_qdot_0, r0y_qdot_1);
-        HVX_Vector r0y_qdot_23 = Q6_Vw_vadd_VwVw(r0y_qdot_2, r0y_qdot_3);
-
-        // Convert to f32
-        HVX_Vector r0y_qdot_01_f = Q6_Vsf_vcvt_Vw(r0y_qdot_01);
-        HVX_Vector r0y_qdot_23_f = Q6_Vsf_vcvt_Vw(r0y_qdot_23);
-
-        // Load d, m, ds, ss
-        // The scales are not necessarily 128-byte aligned, but they are consecutive.
-        // Since we are dealing with 32 elements in r0y_qdot (4 int32 per block, 8 blocks -> 32 int32s).
-        // Wait, each block is 32 elements. We have 8 blocks per 256. 256 * 4 = 1024 elements = 32 blocks.
-        // So 32 pairs of (d, m) and (d, s).
-        // 32 * 2 bytes = 64 bytes for d, 64 bytes for m.
 
         const ggml_half * r0_d = (const ggml_half *)(r0_x_dm + i * x_dblk_size);
         const ggml_half * y_d  = (const ggml_half *)(y_ds + i * y_dsblk_size);
+        HVX_Vector r0_dm = hvx_vmemu((const uint8_t*)r0_d);
+        HVX_Vector y_ds_vec  = hvx_vmemu((const uint8_t*)y_d);
 
-        // Since it's only 32 elements, we can do a quick loop or use HVX.
-        // Let's use HVX for the scales.
-        // We have 32 `r0y_qdot` elements. We need to compute: sum( r0y_qdot * (r0_d * y_d) + r0_m * y_s )
-        HVX_Vector r0_d_vec = hvx_vmemu((const uint8_t*)r0_d); // Loads 64 halfs (128 bytes)
-        HVX_Vector y_d_vec = hvx_vmemu((const uint8_t*)y_d); // Loads 64 halfs (128 bytes)
+        HVX_VectorPair r0_dm_f32 = Q6_Wsf_vcvt_VhfR(r0_dm);
+        HVX_VectorPair y_ds_f32  = Q6_Wsf_vcvt_VhfR(y_ds_vec);
 
-        // Wait, the memory layout of d and m is:
-        // 16 bytes d, 16 bytes m, 16 bytes d, 16 bytes m ...
-        // Wait, repack_row_q4_1x4x2 stores 16 bytes (8 scales) for d, then 16 bytes for m.
-        // Each dblk is 32 bytes (16 d, 16 m). There are 4 dblks for 1024 elements (4 * 256).
-        // So memory layout is:
-        // [16b d] [16b m] [16b d] [16b m] [16b d] [16b m] [16b d] [16b m]
-        // This is 128 bytes total.
-
-        // Unpack d and m into separate vectors
-        // We need the first 8 halfs (16 bytes), skip 16 bytes, etc.
-        // We can just use vshuff or do it in two halves.
-        // Or scalar loop since it's 32 elements. But scalar is slow.
-
-        // Let's convert to fp32 directly using HVX.
-        // Actually, there's a trick.
-        HVX_Vector r0_dm_hf = r0_d_vec; // contains intermixed d and m
-        HVX_Vector y_ds_hf = y_d_vec;   // contains intermixed d and s
-
-        // We can use Q6_Ww_vcvt_VhfR to convert hf to f32. It takes 64 halfs and gives 64 floats (2 HVX vectors).
-        HVX_VectorPair r0_dm_f32 = Q6_Wsf_vcvt_VhfR(r0_dm_hf);
-        HVX_VectorPair y_ds_f32 = Q6_Wsf_vcvt_VhfR(y_ds_hf);
-
-        // Now we have 64 floats for r0 (32 d's, 32 m's) and 64 floats for y (32 d's, 32 s's).
-        // The layout in the 64 floats is: 8 d's, 8 m's, 8 d's, 8 m's, 8 d's, 8 m's, 8 d's, 8 m's.
-        // We can multiply d * d and m * s.
         HVX_Vector r0_dm_y_ds_f32_0 = Q6_Vsf_vmpy_VsfVsf(Q6_V_lo_W(r0_dm_f32), Q6_V_lo_W(y_ds_f32));
         HVX_Vector r0_dm_y_ds_f32_1 = Q6_Vsf_vmpy_VsfVsf(Q6_V_hi_W(r0_dm_f32), Q6_V_hi_W(y_ds_f32));
-
-        // Now r0_dm_y_ds_f32 contains (d*d) and (m*s) interleaved in blocks of 8 floats (32 bytes).
-        // We want to extract the (d*d) values and multiply them by r0y_qdot_f.
-        // Then we add the (m*s) values.
-
-        // We can use vshuff to separate them, or just use predicate to selectively multiply and add.
-        // Or we can just multiply r0y_qdot_01_f with 1.0 for the m*s positions? No.
-
-        // Let's separate (d*d) and (m*s).
-        // r0_dm_y_ds_f32_0 has 32 floats: 8 d*d, 8 m*s, 8 d*d, 8 m*s.
-        // r0_dm_y_ds_f32_1 has 32 floats: 8 d*d, 8 m*s, 8 d*d, 8 m*s.
-
-        HVX_Vector dd_0 = Q6_V_vshuff_VVR(r0_dm_y_ds_f32_0, r0_dm_y_ds_f32_0, 32);
-        // Wait, vshuff with 32 bytes will interleave 32-byte blocks.
-        // Actually, vshuff is complicated. Let's just use vlalign or vror to shift by 32 bytes and then combine.
-        HVX_Vector ms_0 = Q6_V_valign_VVI(r0_dm_y_ds_f32_0, r0_dm_y_ds_f32_0, 32);
-        // Now we need to blend dd_0 and dd_1 to get contiguous d*d and m*s.
-        // Wait, qdot_01 is 32 floats. qdot_01 corresponds to the first 512 elements, which is 16 blocks.
-        // So qdot_01 corresponds to the first 16 d*d and 16 m*s. Which is exactly r0_dm_y_ds_f32_0!
-        // qdot_01 layout: 16 floats. Wait, 4 blocks * 4 = 16 sums. Wait, qdot_01 is 32 floats!
-        // 512 elements = 512 / 32 = 16 blocks. So qdot_01 has 16 sums!
-        // Ah, r0y_qdot_0 is dot product of 256 elements = 8 blocks = 8 sums.
-        // r0y_qdot_1 is dot product of 256 elements = 8 sums.
-        // So r0y_qdot_01 is 16 sums. Not 32!
-        // The first 16 floats of r0y_qdot_01 are the sums, the remaining 16 floats are zero? No, rmpy_x4 returns 32 ints.
-        // Wait, hvx_vec_rmpy_x4 takes 2 HVX vectors (2x128 bytes = 256 bytes) and returns 1 HVX vector of 32 ints.
-        // Because each 128 bytes has 128 elements. 256 elements total. 256 / 4 = 64 sums?
-        // No, rmpy_x4 does sum of 4 products. 256 elements -> 64 ints.
-        // But hvx_vec_rmpy_x4 actually reduces to 32 ints! Let's check hvx_vec_rmpy_x4.
-        // hvx_vec_rmpy_x4 in ggml-hexagon.cpp:
-        // It sums 4 elements. 128 elements -> 32 ints.
-        // So 128 elements of r0 and vy -> 32 ints. Wait!
-        // qblk_size is 256 elements = 256 bytes (since Q8).
-        // hvx_vec_load_q8_1x4x8_full loads 8 vectors = 1024 bytes.
-        // hvx_vec_rmpy_x8_full returns 32 ints! It reduces 1024 elements to 32 ints?
-        // Wait, hvx_vec_rmpy_x8_full reduces 32x int8 elements to 1x int32 element.
-        // 1024 elements / 32 = 32 sums!
-        // So r0y_qdot is exactly 32 int32s!
 
         HVX_Vector qdot = hvx_vec_rmpy_x8_full(r0_q, vy_q);
         HVX_Vector qdot_f = Q6_Vsf_vcvt_Vw(qdot); // 32 floats
@@ -2708,23 +2618,6 @@ static inline void quantize_block_f32_q8x1(float * restrict x, uint8_t * restric
 static inline size_t q8_1x4x2_row_size(uint32_t ne) {
     uint32_t nblocks = (ne + QK_Q8_1x4x2 - 1) / QK_Q8_1x4x2;
     return nblocks * (QK_Q8_1x4x2 + 32);  // 256 quants + 16 bytes d + 16 bytes s
-}
-
-static inline HVX_Vector_x8 hvx_vec_load_q8_1x4x8_full(const uint8_t * restrict ptr) {
-    HVX_Vector_x8 v;
-    v.val[0] = hvx_vmemu(ptr + 0*32);
-    v.val[1] = hvx_vmemu(ptr + 1*32);
-    v.val[2] = hvx_vmemu(ptr + 2*32);
-    v.val[3] = hvx_vmemu(ptr + 3*32);
-    v.val[4] = hvx_vmemu(ptr + 4*32);
-    v.val[5] = hvx_vmemu(ptr + 5*32);
-    v.val[6] = hvx_vmemu(ptr + 6*32);
-    v.val[7] = hvx_vmemu(ptr + 7*32);
-    return v;
-}
-
-static inline HVX_Vector_x8 hvx_vec_load_q8_1x4x8_partial(const uint8_t * restrict ptr, uint32_t nloe) {
-    return hvx_vec_load_q8_1x4x8_full(ptr);
 }
 
 static inline void quantize_block_f32_q8_1x1(float * restrict x, uint8_t * restrict y_q, uint8_t * restrict y_ds) {
