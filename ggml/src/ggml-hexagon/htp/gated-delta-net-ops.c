@@ -8,6 +8,11 @@
 #include "ggml-common.h"
 #include "htp-ctx.h"
 
+#ifdef HTP_HAS_HMX
+#include "hmx-ops.h"
+#endif
+
+
 #ifndef MIN
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #endif
@@ -923,6 +928,20 @@ int op_gated_delta_net(struct htp_ops_context * octx) {
     if (octx->flags & HTP_OPFLAGS_SKIP_COMPUTE) {
         return HTP_STATUS_OK;
     }
+
+#ifdef HTP_HAS_HMX
+    if (octx->ctx->hmx_enabled) {
+        // HMX natively uses 32x32 tiles for fp16 matrix mults.
+        // We will dispatch to HMX if S_v is a multiple of 32.
+        if (S_v % 32 == 0) {
+            int ret = hmx_gated_delta_net_ext(octx);
+            if (ret == HTP_STATUS_OK) {
+                return ret;
+            }
+        }
+    }
+#endif
+
 
     struct htp_gdn_context gctx;
     gctx.octx = octx;

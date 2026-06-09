@@ -63,6 +63,10 @@ int hmx_matmul_q_f32(struct htp_context *ctx,
 // HMX flash attention
 int hmx_flash_attn_ext(struct htp_ops_context * octx);
 
+// HMX gated delta net
+int hmx_gated_delta_net_ext(struct htp_ops_context * octx);
+
+
 #ifdef __cplusplus
 }
 #endif
