@@ -452,7 +452,7 @@ static void vec_dot_q4x4x2_q8x4x2_1x1(const int n, float * restrict s0, const vo
     // Process leftovers
     if (nloe) {
         HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_partial(y_q    + i * y_qblk_size, nloe);
-        HVX_Vector_x8 r0_q = hvx_vec_load_q4x4x8_partial(r0_x_q + i * x_qblk_size, nloe);
+        HVX_Vector_x8 r0_q = hvx_vec_load_q4x4x8_full(r0_x_q + i * x_qblk_size);
 
         HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_partial(r0_q, vy_q, nloe));
 
@@ -539,7 +539,7 @@ static void vec_dot_q4x4x2_q8x4x2_2x1(const int n, float * restrict s0,
     // Process leftovers
     if (nloe) {
         HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_partial(y_q    + i * y_qblk_size, nloe);
-        HVX_Vector_x8 r0_q = hvx_vec_load_q4x4x8_partial(r0_x_q + i * x_qblk_size, nloe);
+        HVX_Vector_x8 r0_q = hvx_vec_load_q4x4x8_full(r0_x_q + i * x_qblk_size);
         HVX_Vector_x8 r1_q = hvx_vec_load_q4x4x8_partial(r1_x_q + i * x_qblk_size, nloe);
 
         HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_partial(r0_q, vy_q, nloe));
@@ -652,7 +652,7 @@ static void vec_dot_q4x4x2_q8x4x2_2x2(const int n, float * restrict s0, float * 
     if (nloe) {
         HVX_Vector_x8 vy0_q = hvx_vec_load_q8x4x8_partial(y0_q   + i * y_qblk_size, nloe);
         HVX_Vector_x8 vy1_q = hvx_vec_load_q8x4x8_partial(y1_q   + i * y_qblk_size, nloe);
-        HVX_Vector_x8 r0_q  = hvx_vec_load_q4x4x8_partial(r0_x_q + i * x_qblk_size, nloe);
+        HVX_Vector_x8 r0_q  = hvx_vec_load_q4x4x8_full(r0_x_q + i * x_qblk_size);
         HVX_Vector_x8 r1_q  = hvx_vec_load_q4x4x8_partial(r1_x_q + i * x_qblk_size, nloe);
 
         HVX_Vector r0_c0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_partial(r0_q, vy0_q, nloe));
@@ -999,6 +999,104 @@ static void vec_dot_q8x4x2_q8x4x2_2x2(const int n, float * restrict s0, float * 
     hvx_vec_store_u(&s1[0], 8, r0_r1_c1_sum);  // row0,col1 row1,col1
 }
 
+
+
+
+
+static void vec_dot_q4kx2_q8x4x2_1x1(const int n, float * restrict s0, const void * restrict vx0, const void * restrict vy0) {
+    assert(n % 32 == 0);
+    const uint32_t qk = 1024;
+    const uint32_t nb = n / qk;
+    const uint32_t nloe = n % qk; // leftover multiples of 32
+
+    const uint32_t x_dblk_size = 8 * 4 * 2; // 32x __fp16 for d
+    const uint32_t x_mblk_size = 8 * 4 * 2; // 32x __fp16 for m
+    const uint32_t x_qblk_size = 512;       // 1024 quants -> 512 bytes
+
+    const uint32_t y_dblk_size = 8 * 4 * 2; // 32x __fp16
+    const uint32_t y_qblk_size = qk;        // 1024 int8
+
+    const uint8_t * restrict r0_x_q = ((const uint8_t *) vx0 + 0);
+    const uint8_t * restrict r0_x_d = ((const uint8_t *) vx0 + (n / 2));
+    const uint8_t * restrict r0_x_m = ((const uint8_t *) vx0 + (n / 2) + (n / 256) * 16);
+
+    const uint8_t * restrict y_q = ((const uint8_t *) vy0 + 0);
+    const uint8_t * restrict y_d = ((const uint8_t *) vy0 + n);
+
+    HVX_Vector r0_sum = Q6_V_vzero();
+
+    HVX_Vector_x8 ones;
+    HVX_Vector one_vec = Q6_Vb_vsplat_R(0x01);
+    ones.v[0] = one_vec; ones.v[1] = one_vec; ones.v[2] = one_vec; ones.v[3] = one_vec;
+    ones.v[4] = one_vec; ones.v[5] = one_vec; ones.v[6] = one_vec; ones.v[7] = one_vec;
+
+    uint32_t i = 0;
+    for (; i < nb; i++) {
+        HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_full(y_q + i * y_qblk_size);
+        HVX_Vector_x8 r0_q = hvx_vec_load_q4x4x8_full(r0_x_q + i * x_qblk_size);
+
+        HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(r0_q, vy_q));
+        HVX_Vector sum_y = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(ones, vy_q));
+
+        HVX_Vector vy_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y_d + i * y_dblk_size));
+        HVX_Vector r0_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_d + i * x_dblk_size));
+        HVX_Vector r0_m = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_m + i * x_mblk_size));
+
+        HVX_Vector r0_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_d, vy_d)));
+        HVX_Vector r0_mm = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy_d)));
+
+        HVX_Vector r0_fa = Q6_Vqf32_vmpy_VsfVsf(r0_ia, r0_dd);
+        HVX_Vector r0_fb = Q6_Vqf32_vmpy_VsfVsf(sum_y, r0_mm);
+
+        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_fa, r0_sum));
+        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vsub_Vqf32Vsf(r0_sum, r0_fb));
+    }
+
+    if (nloe) {
+        HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_full(y_q + i * y_qblk_size);
+        HVX_Vector_x8 r0_q = hvx_vec_load_q4x4x8_full(r0_x_q + i * x_qblk_size);
+
+        HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(r0_q, vy_q));
+        HVX_Vector sum_y = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_full(ones, vy_q));
+
+        HVX_Vector vy_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (y_d + i * y_dblk_size));
+        HVX_Vector r0_d = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_d + i * x_dblk_size));
+        HVX_Vector r0_m = Q6_Vh_vshuff_Vh(*(const HVX_UVector *) (r0_x_m + i * x_mblk_size));
+
+        HVX_Vector r0_dd = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_d, vy_d)));
+        HVX_Vector r0_mm = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(Q6_Wqf32_vmpy_VhfVhf(r0_m, vy_d)));
+
+        HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe / 8);
+        r0_dd                = Q6_V_vand_QV(bmask, r0_dd);
+        r0_mm                = Q6_V_vand_QV(bmask, r0_mm);
+
+        HVX_Vector r0_fa = Q6_Vqf32_vmpy_VsfVsf(r0_ia, r0_dd);
+        HVX_Vector r0_fb = Q6_Vqf32_vmpy_VsfVsf(sum_y, r0_mm);
+
+        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_Vqf32Vsf(r0_fa, r0_sum));
+        r0_sum = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vsub_Vqf32Vsf(r0_sum, r0_fb));
+    }
+
+    float s = 0.0f;
+    float sum_arr[32] __attribute__((aligned(128)));
+    *(HVX_Vector *)sum_arr = r0_sum;
+    for (int k = 0; k < 32; ++k) {
+        s += sum_arr[k];
+    }
+
+    *s0 += s;
+}
+
+static void vec_dot_q4kx2_q8x4x2_2x1(const int n, float * restrict s0, const void * restrict vx0, const void * restrict vx1, const void * restrict vy0) {
+    vec_dot_q4kx2_q8x4x2_1x1(n, &s0[0], vx0, vy0);
+    vec_dot_q4kx2_q8x4x2_1x1(n, &s0[1], vx1, vy0);
+}
+
+static void vec_dot_q4kx2_q8x4x2_2x2(const int n, float * restrict s0, float * restrict s1, const void * restrict vx0, const void * restrict vx1, const void * restrict vy0, const void * restrict vy1) {
+    vec_dot_q4kx2_q8x4x2_2x1(n, s0, vx0, vx1, vy0);
+    vec_dot_q4kx2_q8x4x2_2x1(n, s1, vx0, vx1, vy1);
+}
+
 // ======== IQ4_NL x Q8_0 vec_dot kernels ========
 // Same structure as Q4_0 vec_dot but uses IQ4_NL LUT-based load (4-bit index -> int8 kvalue).
 // Scale format is identical to Q4_0 (fp16 scales).
@@ -1050,7 +1148,7 @@ static void vec_dot_iq4nlx4x2_q8x4x2_1x1(const int n,
     }
 
     if (nloe) {
-        HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_partial(y_q + i * y_qblk_size, nloe);
+        HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_full(y_q + i * y_qblk_size);
         HVX_Vector_x8 r0_q = hvx_vec_load_iq4nlx4x8_partial(r0_x_q + i * x_qblk_size, nloe);
 
         HVX_Vector r0_ia = Q6_Vsf_equals_Vw(hvx_vec_rmpy_x8_partial(r0_q, vy_q, nloe));
@@ -1132,7 +1230,7 @@ static void vec_dot_iq4nlx4x2_q8x4x2_2x1(const int n,
     }
 
     if (nloe) {
-        HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_partial(y_q + i * y_qblk_size, nloe);
+        HVX_Vector_x8 vy_q = hvx_vec_load_q8x4x8_full(y_q + i * y_qblk_size);
         HVX_Vector_x8 r0_q = hvx_vec_load_iq4nlx4x8_partial(r0_x_q + i * x_qblk_size, nloe);
         HVX_Vector_x8 r1_q = hvx_vec_load_iq4nlx4x8_partial(r1_x_q + i * x_qblk_size, nloe);
 
@@ -2751,6 +2849,13 @@ static int htp_mminit_vec_dot(struct htp_matmul_context * mmctx, enum htp_data_t
             mmctx->vec_dot_1x1 = vec_dot_q4x4x2_q8x4x2_1x1;
             mmctx->vec_dot_2x1 = vec_dot_q4x4x2_q8x4x2_2x1;
             mmctx->vec_dot_2x2 = vec_dot_q4x4x2_q8x4x2_2x2;
+            return 0;
+
+        case HTP_TYPE_Q4_K:
+            mmctx->type        = "q4kx2-f32";
+            mmctx->vec_dot_1x1 = vec_dot_q4kx2_q8x4x2_1x1;
+            mmctx->vec_dot_2x1 = vec_dot_q4kx2_q8x4x2_2x1;
+            mmctx->vec_dot_2x2 = vec_dot_q4kx2_q8x4x2_2x2;
             return 0;
         case HTP_TYPE_Q8_0:
             mmctx->type        = "q8x4x2-f32";
